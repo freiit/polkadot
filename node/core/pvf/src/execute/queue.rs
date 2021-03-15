@@ -103,6 +103,8 @@ type Mux = FuturesUnordered<BoxFuture<'static, QueueEvent>>;
 struct Queue {
 	program_path: PathBuf,
 
+	spawn_timeout_secs: u64,
+
 	/// The receiver that receives messages to the pool.
 	to_queue_rx: mpsc::Receiver<ToQueue>,
 
@@ -118,10 +120,12 @@ impl Queue {
 	fn new(
 		program_path: PathBuf,
 		worker_capacity: usize,
+		spawn_timeout_secs: u64,
 		to_queue_rx: mpsc::Receiver<ToQueue>,
 	) -> Self {
 		Self {
 			program_path,
+			spawn_timeout_secs,
 			to_queue_rx,
 			queue: VecDeque::new(),
 			mux: Mux::new(),
@@ -136,7 +140,7 @@ impl Queue {
 	async fn run(mut self) {
 		loop {
 			futures::select! {
-				to_queue = self.to_queue_rx.select_next_some() =>
+				to_queue = self.to_queue_rx.select_next_some() => // TODO: handle none
 					handle_to_queue(&mut self, to_queue),
 				ev = self.mux.select_next_some() => handle_mux(&mut self, ev).await,
 			}
@@ -276,10 +280,11 @@ fn handle_job_finish(
 
 fn spawn_extra_worker(queue: &mut Queue) {
 	let program_path = queue.program_path.clone();
+	let spawn_timeout_secs = queue.spawn_timeout_secs;
 	queue.mux.push(
 		async move {
 			loop {
-				match super::worker::spawn(&program_path).await {
+				match super::worker::spawn(&program_path, spawn_timeout_secs).await {
 					Ok((idle, handle)) => break QueueEvent::Spawn((idle, handle)),
 					Err(_err) => {
 						// TODO: log and retry
@@ -307,8 +312,15 @@ fn assign(queue: &mut Queue, worker: Worker, job: ExecuteJob) {
 pub fn start(
 	program_path: PathBuf,
 	worker_capacity: usize,
+	spawn_timeout_secs: u64,
 ) -> (mpsc::Sender<ToQueue>, impl Future<Output = ()>) {
 	let (to_queue_tx, to_queue_rx) = mpsc::channel(20);
-	let run = Queue::new(program_path, worker_capacity, to_queue_rx).run();
+	let run = Queue::new(
+		program_path,
+		worker_capacity,
+		spawn_timeout_secs,
+		to_queue_rx,
+	)
+	.run();
 	(to_queue_tx, run)
 }

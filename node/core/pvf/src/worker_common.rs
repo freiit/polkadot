@@ -32,11 +32,12 @@ use std::{
 };
 use pin_project::pin_project;
 
-/// Exposed only for integration tests. Use [`spawn`] instead.
+/// This is publicly exposed only for integration tests.
 #[doc(hidden)]
 pub async fn spawn_with_program_path(
 	program_path: &str,
 	extra_args: &[&str],
+	spawn_timeout_secs: u64,
 ) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
 	let socket_path = transient_socket_path();
 	let listener = UnixListener::bind(&socket_path)
@@ -51,7 +52,7 @@ pub async fn spawn_with_program_path(
 			let (stream, _) = accept_result.map_err(|_| SpawnErr::Accept)?;
 			Ok((IdleWorker { stream, pid: handle.id() }, handle))
 		}
-		_ = Delay::new(Duration::from_secs(3)).fuse() => {
+		_ = Delay::new(Duration::from_secs(spawn_timeout_secs)).fuse() => {
 			Err(SpawnErr::AcceptTimeout)
 		}
 	}

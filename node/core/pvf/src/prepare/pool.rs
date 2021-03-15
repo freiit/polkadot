@@ -101,6 +101,7 @@ type Mux = FuturesUnordered<BoxFuture<'static, PoolEvent>>;
 
 struct Pool {
 	program_path: PathBuf,
+	spawn_timeout_secs: u64,
 	to_pool: mpsc::Receiver<ToPool>,
 	from_pool: mpsc::UnboundedSender<FromPool>,
 	spawned: HopSlotMap<Worker, WorkerData>,
@@ -113,6 +114,7 @@ struct Fatal;
 async fn run(
 	Pool {
 		program_path,
+		spawn_timeout_secs,
 		to_pool,
 		mut from_pool,
 		mut spawned,
@@ -123,7 +125,7 @@ async fn run(
 		($expr:expr) => {
 			if let Err(Fatal) = $expr {
 				break;
-				}
+			}
 		};
 	}
 
@@ -132,7 +134,13 @@ async fn run(
 	loop {
 		futures::select! {
 			to_pool = to_pool.next() =>
-				handle_to_pool(&program_path, &mut spawned, &mut mux, to_pool.unwrap()),
+				handle_to_pool(
+					&program_path,
+					spawn_timeout_secs,
+					&mut spawned,
+					&mut mux,
+					to_pool.unwrap(), // TODO:
+				),
 			ev = mux.select_next_some() => break_if_fatal!(handle_mux(&mut from_pool, &mut spawned, ev)),
 		}
 
@@ -162,6 +170,7 @@ async fn purge_dead(
 
 fn handle_to_pool(
 	program_path: &Path,
+	spawn_timeout_secs: u64,
 	spawned: &mut HopSlotMap<Worker, WorkerData>,
 	mux: &mut Mux,
 	to_pool: ToPool,
@@ -172,7 +181,7 @@ fn handle_to_pool(
 			mux.push(
 				async move {
 					loop {
-						match worker::spawn(&program_path).await {
+						match worker::spawn(&program_path, spawn_timeout_secs).await {
 							Ok((idle, handle)) => break PoolEvent::Spawn(idle, handle),
 							Err(err) => {
 								drop(err);
@@ -279,6 +288,7 @@ fn reply(from_pool: &mut mpsc::UnboundedSender<FromPool>, m: FromPool) -> Result
 
 pub fn start(
 	program_path: PathBuf,
+	spawn_timeout_secs: u64,
 ) -> (
 	mpsc::Sender<ToPool>,
 	mpsc::UnboundedReceiver<FromPool>,
@@ -289,6 +299,7 @@ pub fn start(
 
 	let run = run(Pool {
 		program_path,
+		spawn_timeout_secs,
 		to_pool: to_pool_rx,
 		from_pool: from_pool_tx,
 		spawned: HopSlotMap::with_capacity_and_key(20),

@@ -33,9 +33,12 @@ use std::{sync::Arc, time::Duration};
 const NICENESS_BACKGROUND: i32 = 5;
 const NICENESS_FOREGROUND: i32 = 0;
 
-pub async fn spawn(program_path: &Path) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
+pub async fn spawn(
+	program_path: &Path,
+	spawn_timeout_secs: u64,
+) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
 	let program_path = program_path.to_string_lossy();
-	spawn_with_program_path(&program_path, &["prepare-worker"]).await
+	spawn_with_program_path(&program_path, &["prepare-worker"], spawn_timeout_secs).await
 }
 
 pub enum Outcome {

@@ -83,9 +83,11 @@ enum FromHandle {
 pub struct Config {
 	pub cache_path: PathBuf,
 	pub prepare_worker_program_path: PathBuf,
+	pub prepare_worker_spawn_timeout: u64,
 	pub prepare_workers_soft_max_num: usize,
 	pub prepare_workers_hard_max_num: usize,
 	pub execute_worker_program_path: PathBuf,
+	pub execute_worker_spawn_timeout: u64,
 	pub execute_workers_max_num: usize,
 }
 
@@ -94,9 +96,11 @@ impl Config {
 		Self {
 			cache_path,
 			prepare_worker_program_path: program_path.clone(),
+			prepare_worker_spawn_timeout: 3,
 			prepare_workers_soft_max_num: 8,
 			prepare_workers_hard_max_num: 5,
 			execute_worker_program_path: program_path,
+			execute_worker_spawn_timeout: 3,
 			execute_workers_max_num: 5,
 		}
 	}
@@ -109,8 +113,10 @@ pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
 		from_handle_tx: Mutex::new(from_handle_tx),
 	};
 
-	let (to_prepare_pool, from_prepare_pool, run_prepare_pool) =
-		prepare::start_pool(config.prepare_worker_program_path.to_owned());
+	let (to_prepare_pool, from_prepare_pool, run_prepare_pool) = prepare::start_pool(
+		config.prepare_worker_program_path.to_owned(),
+		config.prepare_worker_spawn_timeout,
+	);
 
 	let (to_prepare_queue_tx, from_prepare_queue_rx, run_prepare_queue) = prepare::start_queue(
 		config.prepare_workers_soft_max_num,
@@ -123,6 +129,7 @@ pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
 	let (to_execute_queue_tx, run_execute_queue) = execute::start(
 		config.execute_worker_program_path.to_owned(),
 		config.execute_workers_max_num,
+		config.execute_worker_spawn_timeout,
 	);
 
 	let (to_sweeper_tx, to_sweeper_rx) = mpsc::channel(100);

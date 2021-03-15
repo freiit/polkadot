@@ -32,9 +32,12 @@ use futures_timer::Delay;
 use polkadot_parachain::primitives::ValidationResult;
 use parity_scale_codec::{Encode, Decode};
 
-pub async fn spawn(program_path: &Path) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
+pub async fn spawn(
+	program_path: &Path,
+	spawn_timeout_secs: u64,
+) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
 	let program_path = program_path.to_string_lossy();
-	spawn_with_program_path(&program_path, &["execute-worker"]).await
+	spawn_with_program_path(&program_path, &["execute-worker"], spawn_timeout_secs).await
 }
 
 pub enum Outcome {
