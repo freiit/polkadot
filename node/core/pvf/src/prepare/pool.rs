@@ -123,8 +123,9 @@ async fn run(
 ) {
 	macro_rules! break_if_fatal {
 		($expr:expr) => {
-			if let Err(Fatal) = $expr {
-				break;
+			match $expr {
+				Err(Fatal) => break,
+				Ok(v) => v,
 			}
 		};
 	}
@@ -133,14 +134,16 @@ async fn run(
 
 	loop {
 		futures::select! {
-			to_pool = to_pool.next() =>
+			to_pool = to_pool.next() => {
+				let to_pool = break_if_fatal!(to_pool.ok_or(Fatal));
 				handle_to_pool(
 					&program_path,
 					spawn_timeout_secs,
 					&mut spawned,
 					&mut mux,
-					to_pool.unwrap(), // TODO:
-				),
+					to_pool,
+				)
+			}
 			ev = mux.select_next_some() => break_if_fatal!(handle_mux(&mut from_pool, &mut spawned, ev)),
 		}
 
