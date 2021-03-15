@@ -263,7 +263,14 @@ fn handle_job_finish(
 			}
 		}
 	} else {
-		queue.workers.running.remove(worker);
+		always!(queue.workers.running.remove(worker).is_some());
+
+		if !queue.queue.is_empty() {
+			// The worker has died and we still have work we have to do. Request an extra worker.
+			//
+			// That can potentially overshoot, but that should be OK.
+			spawn_extra_worker(queue);
+		}
 	}
 }
 

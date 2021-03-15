@@ -23,6 +23,7 @@ use futures::{AsyncRead, AsyncWrite, AsyncReadExt as _, AsyncWriteExt as _, Futu
 use futures_timer::Delay;
 use rand::Rng;
 use std::{
+	fmt,
 	mem,
 	pin::Pin,
 	str::FromStr,

@@ -15,7 +15,7 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use async_std::path::PathBuf;
-use polkadot_node_core_pvf::{Pvf, ValidationHost, start};
+use polkadot_node_core_pvf::{Pvf, ValidationHost, start, Config};
 use polkadot_parachain::{
 	primitives::{BlockData, ValidationParams, ValidationResult},
 	wasm_executor::{InvalidCandidate, ValidationError},
@@ -34,9 +34,18 @@ struct TestHost {
 
 impl TestHost {
 	fn new() -> Self {
+		Self::new_with_config(|_| ())
+	}
+
+	fn new_with_config<F>(f: F) -> Self
+	where
+		F: FnOnce(&mut Config),
+	{
 		let cache_dir = tempfile::tempdir().unwrap();
 		let program_path = PathBuf::from(PUPPET_EXE);
-		let (host, task) = start(&program_path, &PathBuf::from(cache_dir.path().to_owned()));
+		let mut config = Config::new(PathBuf::from(cache_dir.path().to_owned()), program_path);
+		f(&mut config);
+		let (host, task) = start(config);
 		let _ = async_std::task::spawn(task);
 		Self {
 			_cache_dir: cache_dir,
@@ -119,4 +128,27 @@ async fn parallel_execution() {
 		std::time::Instant::now().duration_since(start)
 			< std::time::Duration::from_secs(EXECUTION_TIMEOUT_SEC * 2)
 	);
+}
+
+#[async_std::test]
+async fn execute_queue_doesnt_stall_if_workers_died() {
+	let host = TestHost::new_with_config(|cfg| {
+		assert_eq!(cfg.execute_workers_max_num, 5);
+	});
+
+	// Here we spawn 8 validation jobs for the `halt` PVF and share those between 5 workers. The
+	// first five jobs should timeout and the workers killed. For the next 3 jobs a new batch of
+	// workers should be spun up.
+	futures::future::join_all((0u8..=8).map(|_| {
+		host.validate_candidate(
+			halt::wasm_binary_unwrap(),
+			ValidationParams {
+				block_data: BlockData(Vec::new()),
+				parent_head: Default::default(),
+				relay_parent_number: 1,
+				relay_parent_storage_root: Default::default(),
+			},
+		)
+	}))
+	.await;
 }

@@ -80,9 +80,29 @@ enum FromHandle {
 	},
 }
 
-pub fn start(program_path: &Path, cache_path: &Path) -> (ValidationHost, impl Future<Output = ()>) {
-	let cache_path = cache_path.to_owned();
+pub struct Config {
+	pub cache_path: PathBuf,
+	pub prepare_worker_program_path: PathBuf,
+	pub prepare_workers_soft_max_num: usize,
+	pub prepare_workers_hard_max_num: usize,
+	pub execute_worker_program_path: PathBuf,
+	pub execute_workers_max_num: usize,
+}
 
+impl Config {
+	pub fn new(cache_path: PathBuf, program_path: PathBuf) -> Self {
+		Self {
+			cache_path,
+			prepare_worker_program_path: program_path.clone(),
+			prepare_workers_soft_max_num: 8,
+			prepare_workers_hard_max_num: 5,
+			execute_worker_program_path: program_path,
+			execute_workers_max_num: 5,
+		}
+	}
+}
+
+pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
 	let (from_handle_tx, from_handle_rx) = mpsc::channel(10);
 
 	let validation_host = ValidationHost {
@@ -90,25 +110,26 @@ pub fn start(program_path: &Path, cache_path: &Path) -> (ValidationHost, impl Fu
 	};
 
 	let (to_prepare_pool, from_prepare_pool, run_prepare_pool) =
-		prepare::start_pool(program_path.to_owned());
+		prepare::start_pool(config.prepare_worker_program_path.to_owned());
 
-	let soft_capacity = 5;
-	let hard_capacity = 8;
 	let (to_prepare_queue_tx, from_prepare_queue_rx, run_prepare_queue) = prepare::start_queue(
-		soft_capacity,
-		hard_capacity,
-		cache_path.clone(),
+		config.prepare_workers_soft_max_num,
+		config.prepare_workers_hard_max_num,
+		config.cache_path.clone(),
 		to_prepare_pool,
 		from_prepare_pool,
 	);
 
-	let (to_execute_queue_tx, run_execute_queue) = execute::start(program_path.to_owned(), 5);
+	let (to_execute_queue_tx, run_execute_queue) = execute::start(
+		config.execute_worker_program_path.to_owned(),
+		config.execute_workers_max_num,
+	);
 
 	let (to_sweeper_tx, to_sweeper_rx) = mpsc::channel(100);
 	let run_sweeper = sweeper_task(to_sweeper_rx);
 
 	let run = async move {
-		let artifacts = Artifacts::new(&cache_path).await;
+		let artifacts = Artifacts::new(&config.cache_path).await;
 
 		futures::pin_mut!(
 			run_prepare_queue,
@@ -119,7 +140,7 @@ pub fn start(program_path: &Path, cache_path: &Path) -> (ValidationHost, impl Fu
 
 		run(
 			Inner {
-				cache_path,
+				cache_path: config.cache_path,
 				cleanup_pulse_interval: Duration::from_secs(3600),
 				artifact_ttl: Duration::from_secs(3600 * 24),
 				artifacts,
@@ -190,7 +211,7 @@ async fn run(
 			match $expr {
 				Err(Fatal) => break,
 				Ok(v) => v,
-				}
+			}
 		};
 	}
 
@@ -706,7 +727,10 @@ mod tests {
 		run_until(
 			&mut test.run,
 			async {
-				assert_matches!(prepare_q_rx.next().await.unwrap(), prepare::ToQueue::Enqueue { .. });
+				assert_matches!(
+					prepare_q_rx.next().await.unwrap(),
+					prepare::ToQueue::Enqueue { .. }
+				);
 			}
 			.boxed(),
 		)
@@ -726,7 +750,10 @@ mod tests {
 		run_until(
 			&mut test.run,
 			async {
-				assert_matches!(prepare_q_rx.next().await.unwrap(), prepare::ToQueue::Amend { .. });
+				assert_matches!(
+					prepare_q_rx.next().await.unwrap(),
+					prepare::ToQueue::Amend { .. }
+				);
 			}
 			.boxed(),
 		)
@@ -774,9 +801,18 @@ mod tests {
 		run_until(
 			&mut test.run,
 			async {
-				assert_matches!(prepare_q_rx.next().await.unwrap(), prepare::ToQueue::Enqueue { .. });
-				assert_matches!(prepare_q_rx.next().await.unwrap(), prepare::ToQueue::Amend { .. });
-				assert_matches!(prepare_q_rx.next().await.unwrap(), prepare::ToQueue::Enqueue { .. });
+				assert_matches!(
+					prepare_q_rx.next().await.unwrap(),
+					prepare::ToQueue::Enqueue { .. }
+				);
+				assert_matches!(
+					prepare_q_rx.next().await.unwrap(),
+					prepare::ToQueue::Amend { .. }
+				);
+				assert_matches!(
+					prepare_q_rx.next().await.unwrap(),
+					prepare::ToQueue::Enqueue { .. }
+				);
 			}
 			.boxed(),
 		)

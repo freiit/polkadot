@@ -26,7 +26,7 @@ mod worker_common;
 pub use priority::Priority;
 pub use pvf::Pvf;
 
-pub use host::{start, ValidationHost};
+pub use host::{start, Config, ValidationHost};
 
 pub use execute::worker_entrypoint as execute_worker_entrypoint;
 pub use prepare::worker_entrypoint as prepare_worker_entrypoint;
