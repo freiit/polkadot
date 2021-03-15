@@ -176,6 +176,12 @@ impl futures::Future for WorkerHandle {
 	}
 }
 
+impl fmt::Debug for WorkerHandle {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+		write!(f, "WorkerHandle(pid={})", self.id())
+	}
+}
+
 /// Convert the given path into a byte buffer.
 pub fn path_to_bytes(path: &Path) -> &[u8] {
 	// Ideally, we take the OsStr of the path, send that and reconstruct this on the other side.

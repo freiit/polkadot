@@ -308,14 +308,14 @@ async fn handle_worker_concluded(queue: &mut Queue, worker: Worker) -> Result<()
 			match $expr {
 				Some(v) => v,
 				None => {
-					never!();
+					never!("never_none, {}", stringify!($expr));
 					return Ok(());
 				}
 			}
 		};
 	}
 
-	// Extract the 
+	// Find out on which artifact was the worker working.
 	let worker_data = never_none!(queue.workers.get_mut(worker));
 	let job = never_none!(worker_data.job.take());
 	let job_data = never_none!(queue.jobs.remove(job));

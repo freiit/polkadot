@@ -31,6 +31,7 @@ use polkadot_parachain::{
 	wasm_executor::{InvalidCandidate, ValidationError},
 };
 use slotmap::HopSlotMap;
+use always_assert::always;
 
 slotmap::new_key_type! { struct Worker; }
 

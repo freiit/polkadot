@@ -68,6 +68,7 @@ pub enum ToPool {
 	},
 }
 
+#[derive(Debug)]
 pub enum FromPool {
 	/// The given worker was just spawned and is ready to be used.
 	Spawned(Worker),

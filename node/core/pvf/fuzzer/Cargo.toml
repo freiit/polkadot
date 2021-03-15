@@ -8,14 +8,14 @@ edition = "2018"
 polkadot-node-core-pvf = { path = ".." }
 parity-scale-codec = { version = "2.0.0", default-features = false, features = ["derive"] }
 polkadot-parachain = { path = "../../../../parachain" }
-adder = { package = "test-parachain-adder", path = "../../../../parachain/test-parachains/adder" }
-halt = { package = "test-parachain-halt", path = "../../../../parachain/test-parachains/halt" }
 async-std = { version = "1.8.0", features = ["attributes"] }
 futures = "0.3.12"
 futures-timer = "3.0.2"
 honggfuzz = "0.5"
 arbitrary = { version = "0.4.1", features = ["derive"] }
 tempfile = "3.2.0"
+tiny-keccak = { version = "2.0.2", features = ["keccak"] }
+backtrace = "*"
 
 [[bin]]
 name = "torture"

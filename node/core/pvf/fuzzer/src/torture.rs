@@ -20,11 +20,12 @@ use polkadot_node_core_pvf::Pvf;
 use polkadot_parachain::{
 	primitives::{
 		RelayChainBlockNumber, BlockData as GenericBlockData, HeadData as GenericHeadData,
-		ValidationParams,
+		ValidationParams, ValidationResult,
+
 	},
+	wasm_executor::{ValidationError, InvalidCandidate},
 };
 use parity_scale_codec::{Decode, Encode};
-use adder::{HeadData, BlockData, hash_state};
 
 // we have a list of PVFs.
 // Some of them we are going to execute and others we are going to just prepare.
@@ -65,6 +66,7 @@ enum Action {
 	HeadsUp(Vec<u32>),
 }
 
+#[derive(Debug)]
 struct Scenario {
 	actions: Vec<Action>,
 }
@@ -81,12 +83,14 @@ impl Arbitrary for Scenario {
 				fn(&mut Unstructured, &mut ScenarioContext) -> arbitrary::Result<Action>,
 			> = vec![];
 
-			alternatives.push(|input, cx| {
-				let kind = PvfKind::arbitrary(input)?;
-				let cookie = u32::arbitrary(input)?;
-				cx.pvfs.push(kind.clone());
-				Ok(Action::ConjurePvf(kind, cookie))
-			});
+			if cx.pvfs.len() < 5 {
+				alternatives.push(|input, cx| {
+					let kind = PvfKind::arbitrary(input)?;
+					let cookie = u32::arbitrary(input)?;
+					cx.pvfs.push(kind.clone());
+					Ok(Action::ConjurePvf(kind, cookie))
+				});
+			}
 
 			if !cx.pvfs.is_empty() {
 				alternatives.push(|input, cx| {
@@ -161,6 +165,7 @@ impl ScenarioContext {
 struct TestHost {
 	_cache_dir: tempfile::TempDir,
 	host: polkadot_node_core_pvf::ValidationHost,
+	handle: async_std::task::JoinHandle<()>,
 }
 
 impl TestHost {
@@ -169,53 +174,127 @@ impl TestHost {
 		let cache_dir = tempfile::tempdir().unwrap();
 		let program_path = PathBuf::from("/home/lilpep/dev/polkadot-2/target/debug/puppet_worker");
 		let (host, task) = polkadot_node_core_pvf::start(&program_path, &PathBuf::from(cache_dir.path().to_owned()));
-		let _ = async_std::task::spawn(task);
+		let handle = async_std::task::spawn(task);
 		Self {
 			_cache_dir: cache_dir,
 			host,
+			handle,
 		}
 	}
+}
+
+
+fn keccak256(input: &[u8]) -> [u8; 32] {
+	use tiny_keccak::{Hasher as _, Keccak};
+
+	let mut out = [0u8; 32];
+	let mut keccak256 = Keccak::v256();
+	keccak256.update(input);
+	keccak256.finalize(&mut out);
+	out
+}
+
+/// Head data for this parachain.
+#[derive(Default, Clone, Hash, Eq, PartialEq, Encode, Decode, Debug)]
+pub struct HeadData {
+	/// Block number
+	pub number: u64,
+	/// parent block keccak256
+	pub parent_hash: [u8; 32],
+	/// hash of post-execution state.
+	pub post_state: [u8; 32],
+}
+
+impl HeadData {
+	pub fn hash(&self) -> [u8; 32] {
+		keccak256(&self.encode())
+	}
+}
+
+/// Block data for this parachain.
+#[derive(Default, Clone, Encode, Decode, Debug)]
+pub struct BlockData {
+	/// State to begin from.
+	pub state: u64,
+	/// Amount to add (wrapping)
+	pub add: u64,
+}
+
+pub fn hash_state(state: u64) -> [u8; 32] {
+	keccak256(state.encode().as_slice())
 }
 
 async fn play(scenario: Scenario) {
 	let host = TestHost::new();
 	let mut pvfs = Vec::new();
+	let mut pvf_kinds = Vec::new();
+	let mut handles = Vec::new();
 
-	for action in scenario.actions {
+	for (action_idx, action) in scenario.actions.into_iter().enumerate() {
+		println!("action: #{} {:?}", action_idx, action);
 		match action {
 			Action::Delay => {
 				futures_timer::Delay::new(std::time::Duration::from_millis(100)).await;
 			}
 			Action::ConjurePvf(kind, cookie) => {
+				pvf_kinds.push(kind.clone());
 				pvfs.push(Pvf::from_code(&conjure_pvf(kind, cookie)));
 			}
 			Action::ExecutePvf(x, params, priority) => {
 				let pvf = pvfs[x as usize].clone();
 				let (result_tx, result_rx) = oneshot::channel();
-				host.host.execute_pvf(pvf, params, priority.into(), result_tx).await;
-				let _ = result_rx.await;
+				host.host.execute_pvf(pvf, params, priority.into(), result_tx).await.unwrap();
+
+				let kind = pvf_kinds[x as usize].clone();
+
+				let handle = async_std::task::spawn(async move {
+					let result = result_rx.await.unwrap();
+					println!("execution result {:?}", result);
+					match kind {
+						PvfKind::Halt => {
+							match result {
+								Err(ValidationError::InvalidCandidate(InvalidCandidate::ExternalWasmExecutor(msg)))
+									if msg == "hard timeout" => {}
+								r => panic!("{:?}", r),
+							}
+						}
+						PvfKind::Adder => {
+							match result {
+								Ok(_) => {}
+								r => panic!("{:?}", r),
+							}
+						}
+					}
+				});
+
+				handles.push((action_idx, handle));
 			}
 			Action::HeadsUp(xs) => {
-				host.host.heads_up(xs.into_iter().map(|x| pvfs[x as usize].clone()).collect()).await;
+				host.host.heads_up(xs.into_iter().map(|x| pvfs[x as usize].clone()).collect()).await.unwrap();
 			},
 		}
 	}
+
+	for (action_idx, handle) in handles {
+		println!("waiting on: {}", action_idx);
+		handle.await;
+		println!("done");
+	};
 }
 
 fn conjure_pvf(kind: PvfKind, cookie: u32) -> Vec<u8> {
 	let mut base_image = match kind {
-		PvfKind::Adder => adder::wasm_binary_unwrap().to_vec(),
-		PvfKind::Halt => halt::wasm_binary_unwrap().to_vec(),
+		PvfKind::Adder =>
+			std::fs::read(
+				"/home/lilpep/dev/polkadot-2/target/debug/wbuild/test-parachain-adder/test_parachain_adder.compact.wasm").unwrap(),
+		PvfKind::Halt => std::fs::read(
+			"/home/lilpep/dev/polkadot-2/target/debug/wbuild/test-parachain-halt/test_parachain_halt.compact.wasm").unwrap(),
 	};
 
-	// a custom section prologue, consist of a byte with the section id, 0 for a custom section,
-	// followed by the section length. 8 bytes for the section name (len and string), and the cookie.
-	base_image.push(0);
-	base_image.extend_from_slice(&12u32.to_le_bytes());
 
-	// len of the name section string and the name string itself.
-	base_image.extend_from_slice(&4u32.to_le_bytes());
-	base_image.extend_from_slice(b"yolo");
+	base_image.push(0);
+	base_image.push(5); // len
+	base_image.push(0);
 
 	// finally add the cookie bytes.
 	base_image.extend_from_slice(&cookie.to_le_bytes());
@@ -224,10 +303,19 @@ fn conjure_pvf(kind: PvfKind, cookie: u32) -> Vec<u8> {
 }
 
 fn main() {
+	std::panic::set_hook(Box::new(|_| {
+		let bt = backtrace::Backtrace::new();
+		println!("{:?}", bt);
+		std::process::abort();
+	}));
+
 	loop {
 		honggfuzz::fuzz!(|data: &[u8]| {
 			if let Ok(scenario) = Scenario::arbitrary(&mut Unstructured::new(data)) {
-				async_std::task::block_on(play(scenario));
+				if scenario.actions.len() > 0 {
+					println!("{:?}", scenario);
+					async_std::task::block_on(play(scenario));
+				}
 			}
 		});
 	}

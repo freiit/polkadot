@@ -24,7 +24,6 @@ use parity_scale_codec::Encode as _;
 
 mod adder;
 mod worker_common;
-mod torture;
 
 const PUPPET_EXE: &str = env!("CARGO_BIN_EXE_puppet_worker");
 
