@@ -232,9 +232,18 @@ pub fn path_to_bytes(path: &Path) -> &[u8] {
 	path.to_str().expect("non-UTF-8 path").as_bytes()
 }
 
-pub fn bytes_to_path(bytes: &[u8]) -> PathBuf {
-	let str_buf = std::str::from_utf8(bytes).unwrap(); // TODO:
-	PathBuf::from_str(&str_buf).unwrap()
+/// Interprets the given bytes as a path. Returns `None` if the given bytes do not constitute a
+/// a proper utf-8 string.
+pub fn bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
+	let str_buf = std::str::from_utf8(bytes).ok()?;
+
+	match PathBuf::from_str(&str_buf) {
+		Ok(path) => Some(path),
+		Err(never) => {
+			// std::convert::Infallible doesn't allow for irrefutable patterns for some reason.
+			match never { }
+		}
+	}
 }
 
 pub async fn framed_send(w: &mut (impl AsyncWrite + Unpin), buf: &[u8]) -> io::Result<()> {

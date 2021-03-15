@@ -95,11 +95,14 @@ pub async fn start_work(
 		artifact_path_bytes = framed_recv(&mut stream).fuse() => {
 			match artifact_path_bytes {
 				Ok(bytes) => {
-					let tmp_path = bytes_to_path(&bytes);
-					async_std::fs::rename(tmp_path, &artifact_path)
-						.await
-						.map(|_| Selected::Done)
-						.unwrap_or(Selected::IoErr)
+					if let Some(tmp_path) = bytes_to_path(&bytes) {
+						async_std::fs::rename(tmp_path, &artifact_path)
+							.await
+							.map(|_| Selected::Done)
+							.unwrap_or(Selected::IoErr)
+					} else {
+						Selected::IoErr
+					}
 				},
 				Err(_) => Selected::IoErr,
 			}

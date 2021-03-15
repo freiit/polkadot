@@ -109,7 +109,12 @@ async fn send_request(
 
 async fn recv_request(stream: &mut UnixStream) -> io::Result<(PathBuf, Vec<u8>)> {
 	let artifact_path = framed_recv(stream).await?;
-	let artifact_path = bytes_to_path(&artifact_path);
+	let artifact_path = bytes_to_path(&artifact_path).ok_or_else(|| {
+		io::Error::new(
+			io::ErrorKind::Other,
+			format!("execute pvf recv_request: non utf-8 artifact path"),
+		)
+	})?;
 	let params = framed_recv(stream).await?;
 	Ok((artifact_path, params))
 }
@@ -124,7 +129,7 @@ async fn recv_response(stream: &mut UnixStream) -> io::Result<Response> {
 	let response = Response::decode(&mut &response_bytes[..]).map_err(|e| {
 		io::Error::new(
 			io::ErrorKind::Other,
-			format!("response decode error: {:?}", e),
+			format!("execute pvf recv_response: decode error: {:?}", e),
 		)
 	})?;
 	Ok(response)
