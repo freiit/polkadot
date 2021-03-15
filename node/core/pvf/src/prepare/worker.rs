@@ -18,7 +18,7 @@ use crate::{
 	artifacts::Artifact,
 	worker_common::{
 		IdleWorker, SpawnErr, WorkerHandle, bytes_to_path, framed_recv, framed_send, path_to_bytes,
-		spawn_with_program_path, tmpfile,
+		spawn_with_program_path, tmpfile, worker_event_loop,
 	},
 };
 use async_std::{
@@ -38,7 +38,13 @@ pub async fn spawn(
 	spawn_timeout_secs: u64,
 ) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
 	let program_path = program_path.to_string_lossy();
-	spawn_with_program_path(&program_path, &["prepare-worker"], spawn_timeout_secs).await
+	spawn_with_program_path(
+		"prepare",
+		&program_path,
+		&["prepare-worker"],
+		spawn_timeout_secs,
+	)
+	.await
 }
 
 pub enum Outcome {
@@ -141,9 +147,7 @@ fn renice(pid: u32, niceness: i32) {
 }
 
 pub fn worker_entrypoint(socket_path: &str) {
-	let err = async_std::task::block_on::<_, io::Result<()>>(async {
-		let mut stream = UnixStream::connect(socket_path).await?;
-
+	worker_event_loop("prepare", socket_path, |mut stream| async move {
 		loop {
 			let code = recv_request(&mut stream).await?;
 
@@ -156,11 +160,7 @@ pub fn worker_entrypoint(socket_path: &str) {
 			// Communicate the results back to the host.
 			framed_send(&mut stream, &path_to_bytes(&dest)).await?;
 		}
-	})
-	.unwrap_err();
-
-	// TODO: proper handling
-	drop(err);
+	});
 }
 
 fn prepare_artifact(code: &[u8]) -> Artifact {
@@ -175,9 +175,4 @@ fn prepare_artifact(code: &[u8]) -> Artifact {
 		Ok(compiled_artifact) => Artifact::Compiled { compiled_artifact },
 		Err(err) => Artifact::PreparationErr(format!("{:?}", err)),
 	}
-}
-
-#[cfg(test)]
-mod tests {
-	// The logic is actually exercised using an integration test under `tests/it.rs`
 }

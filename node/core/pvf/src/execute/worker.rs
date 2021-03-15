@@ -18,7 +18,7 @@ use crate::{
 	artifacts::Artifact,
 	worker_common::{
 		IdleWorker, SpawnErr, WorkerHandle, bytes_to_path, framed_recv, framed_send, path_to_bytes,
-		spawn_with_program_path,
+		spawn_with_program_path, worker_event_loop,
 	},
 };
 use std::time::{Duration, Instant};
@@ -37,7 +37,13 @@ pub async fn spawn(
 	spawn_timeout_secs: u64,
 ) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
 	let program_path = program_path.to_string_lossy();
-	spawn_with_program_path(&program_path, &["execute-worker"], spawn_timeout_secs).await
+	spawn_with_program_path(
+		"execute",
+		&program_path,
+		&["execute-worker"],
+		spawn_timeout_secs,
+	)
+	.await
 }
 
 pub enum Outcome {
@@ -144,9 +150,7 @@ impl Response {
 }
 
 pub fn worker_entrypoint(socket_path: &str) {
-	let err = async_std::task::block_on::<_, io::Result<()>>(async {
-		let mut stream = UnixStream::connect(socket_path).await?;
-
+	worker_event_loop("execute", socket_path, |mut stream| async move {
 		loop {
 			let (artifact_path, params) = recv_request(&mut stream).await?;
 			let artifact_bytes = async_std::fs::read(&artifact_path).await?;
@@ -159,10 +163,7 @@ pub fn worker_entrypoint(socket_path: &str) {
 			let response = validate_using_artifact(&artifact, &params);
 			send_response(&mut stream, response).await?;
 		}
-	})
-	.unwrap_err();
-
-	drop(err)
+	});
 }
 
 fn validate_using_artifact(artifact: &Artifact, params: &[u8]) -> Response {

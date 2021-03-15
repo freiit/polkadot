@@ -19,12 +19,13 @@ use async_std::{
 	os::unix::net::{UnixListener, UnixStream},
 	path::{PathBuf, Path},
 };
-use futures::{AsyncRead, AsyncWrite, AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _};
+use futures::{
+	AsyncRead, AsyncWrite, AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _, never::Never,
+};
 use futures_timer::Delay;
 use rand::Rng;
 use std::{
-	fmt,
-	mem,
+	fmt, mem,
 	pin::Pin,
 	str::FromStr,
 	task::{Context, Poll},
@@ -35,27 +36,49 @@ use pin_project::pin_project;
 /// This is publicly exposed only for integration tests.
 #[doc(hidden)]
 pub async fn spawn_with_program_path(
+	debug_id: &'static str,
 	program_path: &str,
-	extra_args: &[&str],
+	extra_args: &'static [&'static str],
 	spawn_timeout_secs: u64,
 ) -> Result<(IdleWorker, WorkerHandle), SpawnErr> {
-	let socket_path = transient_socket_path();
-	let listener = UnixListener::bind(&socket_path)
-		.await
-		.map_err(|_| SpawnErr::Bind)?;
+	with_transient_socket_path(debug_id, |socket_path| {
+		let socket_path = socket_path.to_owned();
+		let program_path = PathBuf::from(program_path);
+		async move {
+			let listener = UnixListener::bind(&socket_path)
+				.await
+				.map_err(|_| SpawnErr::Bind)?;
 
-	let handle = WorkerHandle::spawn(&*program_path, extra_args, &socket_path)
-		.map_err(|_| SpawnErr::ProcessSpawn)?;
+			let handle = WorkerHandle::spawn(&program_path, extra_args, socket_path)
+				.map_err(|_| SpawnErr::ProcessSpawn)?;
 
-	futures::select! {
-		accept_result = listener.accept().fuse() => {
-			let (stream, _) = accept_result.map_err(|_| SpawnErr::Accept)?;
-			Ok((IdleWorker { stream, pid: handle.id() }, handle))
+			futures::select! {
+				accept_result = listener.accept().fuse() => {
+					let (stream, _) = accept_result.map_err(|_| SpawnErr::Accept)?;
+					Ok((IdleWorker { stream, pid: handle.id() }, handle))
+				}
+				_ = Delay::new(Duration::from_secs(spawn_timeout_secs)).fuse() => {
+					Err(SpawnErr::AcceptTimeout)
+				}
+			}
 		}
-		_ = Delay::new(Duration::from_secs(spawn_timeout_secs)).fuse() => {
-			Err(SpawnErr::AcceptTimeout)
-		}
-	}
+	})
+	.await
+}
+
+async fn with_transient_socket_path<R, F, Fut>(debug_id: &'static str, f: F) -> R
+where
+	F: FnOnce(&Path) -> Fut,
+	Fut: futures::Future<Output = R> + 'static,
+{
+	let socket_path = tmpfile(&format!("pvf-host-{}", debug_id));
+	let result = f(&socket_path).await;
+
+	// Best effort to remove the socket file. Under normal circumstances the socket will be removed
+	// by the worker. We make sure that it is removed here, just in case a failed rendezvous.
+	let _ = async_std::fs::remove_file(socket_path).await;
+
+	result
 }
 
 pub fn tmpfile(prefix: &str) -> PathBuf {
@@ -78,8 +101,23 @@ pub fn tmpfile(prefix: &str) -> PathBuf {
 	temp_dir
 }
 
-fn transient_socket_path() -> PathBuf {
-	tmpfile("pvf-prepare-")
+pub fn worker_event_loop<F, Fut>(debug_id: &'static str, socket_path: &str, mut event_loop: F)
+where
+	F: FnMut(UnixStream) -> Fut,
+	Fut: futures::Future<Output = io::Result<Never>>,
+{
+	let err = async_std::task::block_on::<_, io::Result<()>>(async move {
+		let stream = UnixStream::connect(socket_path).await?;
+		let _ = async_std::fs::remove_file(socket_path).await;
+
+		event_loop(stream).await?;
+
+		Ok(())
+	})
+	.unwrap_err();
+
+	// TODO: proper error logging
+	drop((debug_id, err));
 }
 
 #[derive(Debug)]
@@ -116,11 +154,11 @@ pub struct WorkerHandle {
 
 impl WorkerHandle {
 	fn spawn(
-		program: &str,
+		program: impl AsRef<Path>,
 		extra_args: &[&str],
 		socket_path: impl AsRef<Path>,
 	) -> io::Result<Self> {
-		let mut child = async_process::Command::new(program)
+		let mut child = async_process::Command::new(program.as_ref())
 			.args(extra_args)
 			.arg(socket_path.as_ref().as_os_str())
 			.stdout(async_process::Stdio::piped())
