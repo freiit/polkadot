@@ -341,9 +341,11 @@ async fn handle_execute_pvf(
 	match artifacts.artifacts.entry(artifact_id.clone()) {
 		Entry::Occupied(mut o) => match *o.get_mut() {
 			ArtifactState::Prepared {
-				ref artifact_path, ..
+				ref artifact_path,
+				ref mut last_time_needed,
 			} => {
-				// TODO: Update the last needed
+				*last_time_needed = SystemTime::now();
+
 				execute_queue
 					.send(execute::ToQueue::Enqueue {
 						artifact_path: artifact_path.clone(),
