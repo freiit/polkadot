@@ -45,4 +45,5 @@ sp-wasm-interface = { git = "https://github.com/paritytech/substrate", branch = 
 [dev-dependencies]
 adder = { package = "test-parachain-adder", path = "../../../parachain/test-parachains/adder" }
 halt = { package = "test-parachain-halt", path = "../../../parachain/test-parachains/halt" }
+hex-literal = "0.3.1"
 tempfile = "3.2.0"

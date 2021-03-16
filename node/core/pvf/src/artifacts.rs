@@ -206,10 +206,16 @@ mod tests {
 		assert!(ArtifactId::from_file_name("").is_none());
 		assert!(ArtifactId::from_file_name("junk").is_none());
 
-		// TODO: Verify the resulting hash
-		assert!(ArtifactId::from_file_name(
-			"wasmtime_1_0x0000000000000000000000000000000000000000000000000000000000000000"
-		)
-		.is_some());
+		assert_eq!(
+			ArtifactId::from_file_name(
+				"wasmtime_1_0x0022800000000000000000000000000000000000000000000000000000000000"
+			),
+			Some(ArtifactId::new(
+				hex_literal::hex![
+					"0022800000000000000000000000000000000000000000000000000000000000"
+				]
+				.into()
+			)),
+		);
 	}
 }
