@@ -116,8 +116,17 @@ where
 	})
 	.unwrap_err();
 
-	// TODO: proper error logging
-	drop((debug_id, err));
+	// This executes in the context of a worker where we don't want to spin up all the diagnostic
+	// machinery.
+	//
+	// Due to the fact that we are spawning a process the stderr will be inherited and will be
+	// displayed in the console of the process.
+	eprintln!(
+		"pvf worker ({}) pid={}: {:?}",
+		debug_id,
+		std::process::id(),
+		err,
+	);
 }
 
 #[derive(Debug)]
@@ -241,7 +250,7 @@ pub fn bytes_to_path(bytes: &[u8]) -> Option<PathBuf> {
 		Ok(path) => Some(path),
 		Err(never) => {
 			// std::convert::Infallible doesn't allow for irrefutable patterns for some reason.
-			match never { }
+			match never {}
 		}
 	}
 }

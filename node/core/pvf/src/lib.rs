@@ -31,6 +31,8 @@ pub use host::{start, Config, ValidationHost};
 pub use execute::worker_entrypoint as execute_worker_entrypoint;
 pub use prepare::worker_entrypoint as prepare_worker_entrypoint;
 
+const LOG_TARGET: &str = "parachain::pvf";
+
 #[doc(hidden)]
 pub mod integration_test {
 	pub mod worker_common {

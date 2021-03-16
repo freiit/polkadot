@@ -16,6 +16,7 @@
 
 use crate::{
 	worker_common::{IdleWorker, WorkerHandle},
+	LOG_TARGET,
 };
 use super::{
 	worker::{self, Outcome},
@@ -164,9 +165,7 @@ async fn purge_dead(
 	}
 	for w in to_remove {
 		let _ = spawned.remove(w);
-		from_pool
-			.unbounded_send(FromPool::Rip(w))
-			.map_err(|_| Fatal)?;
+		reply(from_pool, FromPool::Rip(w))?;
 	}
 	Ok(())
 }
@@ -187,9 +186,12 @@ fn handle_to_pool(
 						match worker::spawn(&program_path, spawn_timeout_secs).await {
 							Ok((idle, handle)) => break PoolEvent::Spawn(idle, handle),
 							Err(err) => {
-								drop(err);
 								// TODO: Retry
-								// TODO: log
+								tracing::warn!(
+									target: LOG_TARGET,
+									"failed to spawn a prepare worker: {:?}",
+									err,
+								)
 							}
 						}
 					}

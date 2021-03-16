@@ -15,6 +15,7 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::{
+	LOG_TARGET,
 	artifacts::Artifact,
 	worker_common::{
 		IdleWorker, SpawnErr, WorkerHandle, bytes_to_path, framed_recv, framed_send, path_to_bytes,
@@ -73,8 +74,7 @@ pub async fn start_work(
 	}
 
 	if let Err(err) = send_request(&mut stream, code).await {
-		drop(err);
-		// TODO: Log
+		tracing::warn!("failed to send a prepare request to pid={}: {:?}", pid, err);
 		return Outcome::DidntMakeIt;
 	}
 
@@ -144,7 +144,7 @@ fn renice(pid: u32, niceness: i32) {
 	unsafe {
 		if -1 == libc::setpriority(libc::PRIO_PROCESS, pid, niceness) {
 			let err = std::io::Error::last_os_error();
-			drop(err); // TODO: warn
+			tracing::warn!(target: LOG_TARGET, "failed to set the priority: {:?}", err,);
 		}
 	}
 }

@@ -14,6 +14,7 @@
 // You should have received a copy of the GNU General Public License
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
+use crate::LOG_TARGET;
 use async_std::path::{Path, PathBuf};
 use polkadot_core_primitives::Hash;
 use std::{collections::HashMap, time::SystemTime};
@@ -110,8 +111,12 @@ impl Artifacts {
 	pub async fn new(cache_path: &Path) -> Self {
 		let artifacts = match scan_for_known_artifacts(cache_path).await {
 			Ok(a) => a,
-			Err(_) => {
-				// TODO: warn
+			Err(err) => {
+				tracing::warn!(
+					target: LOG_TARGET,
+					"unable to seed the artifacts in memory cache: {:?}. Starting with a clean one",
+					err,
+				);
 				HashMap::new()
 			}
 		};
@@ -137,7 +142,11 @@ async fn scan_for_known_artifacts(
 		let entry = res?;
 
 		if entry.file_type().await?.is_dir() {
-			// dirs do not belong to us, remove.
+			tracing::debug!(
+				target: LOG_TARGET,
+				"{} is a dir, and dirs do not belong to us. Removing",
+				entry.path().display(),
+			);
 			let _ = async_std::fs::remove_dir_all(entry.path()).await;
 		}
 
@@ -152,7 +161,11 @@ async fn scan_for_known_artifacts(
 
 		let file_name = match file_name.to_str() {
 			None => {
-				// Non unicode file name? Definitely not us.
+				tracing::debug!(
+					target: LOG_TARGET,
+					"{} is not utf-8. Removing",
+					path.display(),
+				);
 				let _ = async_std::fs::remove_file(&path).await;
 				continue;
 			}
@@ -161,6 +174,11 @@ async fn scan_for_known_artifacts(
 
 		let artifact_id = match ArtifactId::from_file_name(file_name) {
 			None => {
+				tracing::debug!(
+					target: LOG_TARGET,
+					"{} is not a recognized artifact. Removing",
+					path.display(),
+				);
 				let _ = async_std::fs::remove_file(&path).await;
 				continue;
 			}

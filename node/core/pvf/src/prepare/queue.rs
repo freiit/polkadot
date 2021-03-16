@@ -17,7 +17,7 @@
 use super::{
 	pool::{self, Worker},
 };
-use crate::{Priority, Pvf, artifacts::ArtifactId};
+use crate::{LOG_TARGET, Priority, Pvf, artifacts::ArtifactId};
 use futures::{Future, SinkExt, channel::mpsc, stream::StreamExt as _};
 use std::collections::{HashMap, VecDeque};
 use async_std::path::PathBuf;
@@ -183,7 +183,7 @@ impl Queue {
 			($expr:expr) => {
 				if let Err(Fatal) = $expr {
 					break;
-					}
+				}
 			};
 		}
 
@@ -220,7 +220,11 @@ async fn handle_enqueue(queue: &mut Queue, priority: Priority, pvf: Pvf) -> Resu
 	let artifact_id = pvf.to_artifact_id();
 	if never!(queue.artifact_id_to_job.contains_key(&artifact_id)) {
 		// We already know about this artifact yet it was still enqueued.
-		// TODO: log
+		tracing::warn!(
+			target: LOG_TARGET,
+			"duplicate `enqueue` command received for {:?}",
+			artifact_id,
+		);
 		return Ok(());
 	}
 
@@ -606,12 +610,21 @@ mod tests {
 		test.send_from_pool(pool::FromPool::Spawned(w2));
 
 		// Get two start works.
-		assert_matches!(test.poll_and_recv_to_pool().await, pool::ToPool::StartWork { .. });
-		assert_matches!(test.poll_and_recv_to_pool().await, pool::ToPool::StartWork { .. });
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
 
 		test.send_from_pool(pool::FromPool::Concluded(w1));
 
-		assert_matches!(test.poll_and_recv_to_pool().await, pool::ToPool::StartWork { .. });
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
 
 		// Enqueue a critical job.
 		test.send_queue(ToQueue::Enqueue {
@@ -635,7 +648,10 @@ mod tests {
 		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
 		let w1 = test.workers.insert(());
 		test.send_from_pool(pool::FromPool::Spawned(w1));
-		assert_matches!(test.poll_and_recv_to_pool().await, pool::ToPool::StartWork { .. });
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
 
 		// Enqueue a critical job, which warrants spawning over the soft limit.
 		test.send_queue(ToQueue::Enqueue {
@@ -669,7 +685,10 @@ mod tests {
 		let w = test.workers.insert(());
 		test.send_from_pool(pool::FromPool::Spawned(w));
 
-		assert_matches!(test.poll_and_recv_to_pool().await, pool::ToPool::StartWork { .. });
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
 		test.send_queue(ToQueue::Amend {
 			priority: Priority::Normal,
 			artifact_id: pvf(1).to_artifact_id(),

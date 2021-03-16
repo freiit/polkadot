@@ -16,8 +16,11 @@
 
 //! A queue that handles requests for PVF execution.
 
+use crate::{
+	worker_common::{IdleWorker, WorkerHandle},
+	LOG_TARGET,
+};
 use super::worker::Outcome;
-use crate::worker_common::{IdleWorker, WorkerHandle};
 use std::{collections::VecDeque, fmt, task::Poll};
 use futures::{
 	Future, FutureExt,
@@ -291,8 +294,13 @@ fn spawn_extra_worker(queue: &mut Queue) {
 			loop {
 				match super::worker::spawn(&program_path, spawn_timeout_secs).await {
 					Ok((idle, handle)) => break QueueEvent::Spawn((idle, handle)),
-					Err(_err) => {
-						// TODO: log and retry
+					Err(err) => {
+						// TODO: retry
+						tracing::warn!(
+							target: LOG_TARGET,
+							"failed to spawn an execute worker: {:?}",
+							err,
+						)
 					}
 				}
 			}
