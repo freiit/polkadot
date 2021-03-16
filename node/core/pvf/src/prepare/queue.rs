@@ -90,9 +90,8 @@ impl WorkerData {
 	}
 }
 
-/// TODO:
-/// This structure is prone to starving, however, we don't care that much since we expect there is
-/// going to be a limited number of critical jobs and we don't really care if background starve.
+/// A queue structured like this is prone to starving, however, we don't care that much since we expect
+///  there is going to be a limited number of critical jobs and we don't really care if background starve.
 #[derive(Default)]
 struct Unscheduled {
 	background: VecDeque<Job>,

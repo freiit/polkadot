@@ -287,28 +287,31 @@ fn handle_job_finish(
 }
 
 fn spawn_extra_worker(queue: &mut Queue) {
-	let program_path = queue.program_path.clone();
-	let spawn_timeout_secs = queue.spawn_timeout_secs;
-	queue.mux.push(
-		async move {
-			loop {
-				match super::worker::spawn(&program_path, spawn_timeout_secs).await {
-					Ok((idle, handle)) => break QueueEvent::Spawn((idle, handle)),
-					Err(err) => {
-						// TODO: retry
-						tracing::warn!(
-							target: LOG_TARGET,
-							"failed to spawn an execute worker: {:?}",
-							err,
-						)
-					}
-				}
+	queue
+		.mux
+		.push(spawn_worker_task(queue.program_path.clone(), queue.spawn_timeout_secs).boxed());
+	queue.workers.spawn_inflight += 1;
+}
+
+async fn spawn_worker_task(program_path: PathBuf, spawn_timeout_secs: u64) -> QueueEvent {
+	use futures_timer::Delay;
+	use std::time::Duration;
+
+	loop {
+		match super::worker::spawn(&program_path, spawn_timeout_secs).await {
+			Ok((idle, handle)) => break QueueEvent::Spawn((idle, handle)),
+			Err(err) => {
+				tracing::warn!(
+					target: LOG_TARGET,
+					"failed to spawn an execute worker: {:?}",
+					err,
+				);
+
+				// Assume that the failure intermittent and retry after a delay.
+				Delay::new(Duration::from_secs(3)).await;
 			}
 		}
-		.boxed(),
-	);
-
-	queue.workers.spawn_inflight += 1;
+	}
 }
 
 fn assign(queue: &mut Queue, worker: Worker, job: ExecuteJob) {
