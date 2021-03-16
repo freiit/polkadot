@@ -179,25 +179,7 @@ fn handle_to_pool(
 ) {
 	match to_pool {
 		ToPool::Spawn => {
-			let program_path = program_path.to_owned();
-			mux.push(
-				async move {
-					loop {
-						match worker::spawn(&program_path, spawn_timeout_secs).await {
-							Ok((idle, handle)) => break PoolEvent::Spawn(idle, handle),
-							Err(err) => {
-								// TODO: Retry
-								tracing::warn!(
-									target: LOG_TARGET,
-									"failed to spawn a prepare worker: {:?}",
-									err,
-								)
-							}
-						}
-					}
-				}
-				.boxed(),
-			);
+			mux.push(spawn_worker_task(program_path.to_owned(), spawn_timeout_secs).boxed());
 		}
 		ToPool::StartWork {
 			worker,
@@ -208,14 +190,8 @@ fn handle_to_pool(
 			if let Some(data) = spawned.get_mut(worker) {
 				if let Some(idle) = data.idle.take() {
 					mux.push(
-						async move {
-							PoolEvent::StartWork(
-								worker,
-								worker::start_work(idle, code, artifact_path, background_priority)
-									.await,
-							)
-						}
-						.boxed(),
+						start_work_task(worker, idle, code, artifact_path, background_priority)
+							.boxed(),
 					);
 				} else {
 					never!();
@@ -235,6 +211,38 @@ fn handle_to_pool(
 			}
 		}
 	}
+}
+
+async fn spawn_worker_task(program_path: PathBuf, spawn_timeout_secs: u64) -> PoolEvent {
+	use futures_timer::Delay;
+	use std::time::Duration;
+
+	loop {
+		match worker::spawn(&program_path, spawn_timeout_secs).await {
+			Ok((idle, handle)) => break PoolEvent::Spawn(idle, handle),
+			Err(err) => {
+				tracing::warn!(
+					target: LOG_TARGET,
+					"failed to spawn a prepare worker: {:?}",
+					err,
+				);
+
+				// Assume that the failure intermittent and retry after a delay.
+				Delay::new(Duration::from_secs(3)).await;
+			}
+		}
+	}
+}
+
+async fn start_work_task(
+	worker: Worker,
+	idle: IdleWorker,
+	code: Arc<Vec<u8>>,
+	artifact_path: PathBuf,
+	background_priority: bool,
+) -> PoolEvent {
+	let outcome = worker::start_work(idle, code, artifact_path, background_priority).await;
+	PoolEvent::StartWork(worker, outcome)
 }
 
 fn handle_mux(
