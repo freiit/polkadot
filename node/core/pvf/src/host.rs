@@ -34,7 +34,7 @@ use futures::{
 };
 
 pub struct ValidationHost {
-	from_handle_tx: Mutex<mpsc::Sender<FromHandle>>,
+	to_host_tx: Mutex<mpsc::Sender<ToHost>>,
 }
 
 impl ValidationHost {
@@ -45,10 +45,10 @@ impl ValidationHost {
 		priority: Priority,
 		result_tx: oneshot::Sender<Result<ValidationResult, ValidationError>>,
 	) -> Result<(), String> {
-		self.from_handle_tx
+		self.to_host_tx
 			.lock()
 			.await
-			.send(FromHandle::ExecutePvf {
+			.send(ToHost::ExecutePvf {
 				pvf,
 				params,
 				priority,
@@ -59,16 +59,16 @@ impl ValidationHost {
 	}
 
 	pub async fn heads_up(&self, active_pvfs: Vec<Pvf>) -> Result<(), String> {
-		self.from_handle_tx
+		self.to_host_tx
 			.lock()
 			.await
-			.send(FromHandle::HeadsUp { active_pvfs })
+			.send(ToHost::HeadsUp { active_pvfs })
 			.await
 			.map_err(|_| format!("the inner loop hung up"))
 	}
 }
 
-enum FromHandle {
+enum ToHost {
 	ExecutePvf {
 		pvf: Pvf,
 		params: Vec<u8>,
@@ -107,10 +107,10 @@ impl Config {
 }
 
 pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
-	let (from_handle_tx, from_handle_rx) = mpsc::channel(10);
+	let (to_host_tx, to_host_rx) = mpsc::channel(10);
 
 	let validation_host = ValidationHost {
-		from_handle_tx: Mutex::new(from_handle_tx),
+		to_host_tx: Mutex::new(to_host_tx),
 	};
 
 	let (to_prepare_pool, from_prepare_pool, run_prepare_pool) = prepare::start_pool(
@@ -151,7 +151,7 @@ pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
 				cleanup_pulse_interval: Duration::from_secs(3600),
 				artifact_ttl: Duration::from_secs(3600 * 24),
 				artifacts,
-				from_handle_rx,
+				to_host_rx,
 				to_prepare_queue_tx,
 				from_prepare_queue_rx,
 				to_execute_queue_tx,
@@ -181,7 +181,7 @@ struct Inner {
 	artifact_ttl: Duration,
 	artifacts: Artifacts,
 
-	from_handle_rx: mpsc::Receiver<FromHandle>,
+	to_host_rx: mpsc::Receiver<ToHost>,
 
 	to_prepare_queue_tx: mpsc::Sender<prepare::ToQueue>,
 	from_prepare_queue_rx: mpsc::UnboundedReceiver<prepare::FromQueue>,
@@ -201,7 +201,7 @@ async fn run(
 		cleanup_pulse_interval,
 		artifact_ttl,
 		mut artifacts,
-		from_handle_rx,
+		to_host_rx,
 		from_prepare_queue_rx,
 		mut to_prepare_queue_tx,
 		mut to_execute_queue_tx,
@@ -225,7 +225,7 @@ async fn run(
 	let cleanup_pulse = pulse_every(cleanup_pulse_interval).fuse();
 	futures::pin_mut!(cleanup_pulse);
 
-	let mut from_handle_rx = from_handle_rx.fuse();
+	let mut to_host_rx = to_host_rx.fuse();
 	let mut from_prepare_queue_rx = from_prepare_queue_rx.fuse();
 
 	// Make sure that the task-futures are fused.
@@ -246,7 +246,7 @@ async fn run(
 				panic!()
 			},
 			_ = sweeper => {
-				panic!()
+				panic!() // TODO:
 			},
 			() = cleanup_pulse.select_next_some() => {
 				break_if_fatal!(handle_cleanup_pulse(
@@ -255,15 +255,15 @@ async fn run(
 					&artifact_ttl,
 				).await);
 			},
-			from_handle = from_handle_rx.next() => {
-				let from_handle = break_if_fatal!(from_handle.ok_or(Fatal));
+			to_host = to_host_rx.next() => {
+				let to_host = break_if_fatal!(to_host.ok_or(Fatal));
 
-				break_if_fatal!(handle_from_handle(
+				break_if_fatal!(handle_to_host(
 					&mut artifacts,
 					&mut to_prepare_queue_tx,
 					&mut to_execute_queue_tx,
 					&mut awaiting_prepare,
-					from_handle,
+					to_host,
 				)
 				.await);
 			},
@@ -292,15 +292,15 @@ async fn run(
 	}
 }
 
-async fn handle_from_handle(
+async fn handle_to_host(
 	artifacts: &mut Artifacts,
 	prepare_queue: &mut mpsc::Sender<prepare::ToQueue>,
 	execute_queue: &mut mpsc::Sender<execute::ToQueue>,
 	awaiting_prepare: &mut HashMap<ArtifactId, Vec<PendingExecutionRequest>>,
-	from_handle: FromHandle,
+	to_host: ToHost,
 ) -> Result<(), Fatal> {
-	match from_handle {
-		FromHandle::ExecutePvf {
+	match to_host {
+		ToHost::ExecutePvf {
 			pvf,
 			params,
 			priority,
@@ -318,7 +318,7 @@ async fn handle_from_handle(
 			)
 			.await?;
 		}
-		FromHandle::HeadsUp { active_pvfs } => {
+		ToHost::HeadsUp { active_pvfs } => {
 			handle_heads_up(artifacts, prepare_queue, active_pvfs).await?;
 		}
 	}
@@ -576,7 +576,7 @@ mod tests {
 	}
 
 	struct Test {
-		from_handle_tx: Option<mpsc::Sender<FromHandle>>,
+		to_host_tx: Option<mpsc::Sender<ToHost>>,
 
 		to_prepare_queue_rx: mpsc::Receiver<prepare::ToQueue>,
 		from_prepare_queue_tx: mpsc::UnboundedSender<prepare::FromQueue>,
@@ -596,7 +596,7 @@ mod tests {
 		) -> Self {
 			let cache_path = PathBuf::from(std::env::temp_dir());
 
-			let (from_handle_tx, from_handle_rx) = mpsc::channel(10);
+			let (to_host_tx, to_host_rx) = mpsc::channel(10);
 			let (to_prepare_queue_tx, to_prepare_queue_rx) = mpsc::channel(10);
 			let (from_prepare_queue_tx, from_prepare_queue_rx) = mpsc::unbounded();
 			let (to_execute_queue_tx, to_execute_queue_rx) = mpsc::channel(10);
@@ -610,7 +610,7 @@ mod tests {
 					cleanup_pulse_interval,
 					artifact_ttl,
 					artifacts,
-					from_handle_rx,
+					to_host_rx,
 					to_prepare_queue_tx,
 					from_prepare_queue_rx,
 					to_execute_queue_tx,
@@ -625,7 +625,7 @@ mod tests {
 			.boxed();
 
 			Self {
-				from_handle_tx: Some(from_handle_tx),
+				to_host_tx: Some(to_host_tx),
 				to_prepare_queue_rx,
 				from_prepare_queue_tx,
 				to_execute_queue_rx,
@@ -635,9 +635,9 @@ mod tests {
 		}
 
 		fn host_handle(&mut self) -> ValidationHost {
-			let tx = self.from_handle_tx.take().unwrap();
+			let tx = self.to_host_tx.take().unwrap();
 			ValidationHost {
-				from_handle_tx: Mutex::new(tx),
+				to_host_tx: Mutex::new(tx),
 			}
 		}
 	}
@@ -675,7 +675,7 @@ mod tests {
 
 		// Dropping the handle will lead to conclusion of the read part and thus will make the event
 		// loop to stop, which in turn will resolve the join handle.
-		drop(test.from_handle_tx);
+		drop(test.to_host_tx);
 		join_handle.await;
 	}
 
