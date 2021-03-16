@@ -49,8 +49,7 @@ impl Pvf {
 	}
 
 	/// Returns the artifact ID that corresponds to this PVF.
-	pub fn to_artifact_id(&self) -> ArtifactId {
-		// TODO: rename this to `as` since it doesn't perform any costly conversion?
+	pub fn as_artifact_id(&self) -> ArtifactId {
 		ArtifactId::new(self.code_hash.clone())
 	}
 }

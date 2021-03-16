@@ -217,7 +217,7 @@ async fn handle_to_queue(queue: &mut Queue, to_queue: ToQueue) -> Result<(), Fat
 async fn handle_enqueue(queue: &mut Queue, priority: Priority, pvf: Pvf) -> Result<(), Fatal> {
 	println!("enque");
 
-	let artifact_id = pvf.to_artifact_id();
+	let artifact_id = pvf.as_artifact_id();
 	if never!(queue.artifact_id_to_job.contains_key(&artifact_id)) {
 		// We already know about this artifact yet it was still enqueued.
 		tracing::warn!(
@@ -323,7 +323,7 @@ async fn handle_worker_concluded(queue: &mut Queue, worker: Worker) -> Result<()
 	let worker_data = never_none!(queue.workers.get_mut(worker));
 	let job = never_none!(worker_data.job.take());
 	let job_data = never_none!(queue.jobs.remove(job));
-	let artifact_id = job_data.pvf.to_artifact_id();
+	let artifact_id = job_data.pvf.as_artifact_id();
 
 	queue.artifact_id_to_job.remove(&artifact_id);
 
@@ -384,7 +384,7 @@ async fn spawn_extra_worker(queue: &mut Queue, critical: bool) -> Result<(), Fat
 async fn assign(queue: &mut Queue, worker: Worker, job: Job) -> Result<(), Fatal> {
 	let job_data = &mut queue.jobs[job];
 
-	let artifact_id = job_data.pvf.to_artifact_id();
+	let artifact_id = job_data.pvf.as_artifact_id();
 	let artifact_path = artifact_id.path(&queue.cache_path);
 
 	job_data.worker = dbg!(Some(worker));
@@ -578,7 +578,7 @@ mod tests {
 
 		assert_eq!(
 			test.poll_and_recv_from_queue().await,
-			FromQueue::Prepared(pvf(1).to_artifact_id())
+			FromQueue::Prepared(pvf(1).as_artifact_id())
 		);
 	}
 
@@ -691,7 +691,7 @@ mod tests {
 		);
 		test.send_queue(ToQueue::Amend {
 			priority: Priority::Normal,
-			artifact_id: pvf(1).to_artifact_id(),
+			artifact_id: pvf(1).as_artifact_id(),
 		});
 
 		assert_eq!(

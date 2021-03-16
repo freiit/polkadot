@@ -336,7 +336,7 @@ async fn handle_execute_pvf(
 	priority: Priority,
 	result_tx: oneshot::Sender<Result<ValidationResult, ValidationError>>,
 ) -> Result<(), Fatal> {
-	let artifact_id = pvf.to_artifact_id();
+	let artifact_id = pvf.as_artifact_id();
 
 	match artifacts.artifacts.entry(artifact_id.clone()) {
 		Entry::Occupied(mut o) => match *o.get_mut() {
@@ -357,7 +357,7 @@ async fn handle_execute_pvf(
 				prepare_queue
 					.send(prepare::ToQueue::Amend {
 						priority,
-						artifact_id: pvf.to_artifact_id(),
+						artifact_id: pvf.as_artifact_id(),
 					})
 					.await
 					.map_err(|_| Fatal)?;
@@ -393,7 +393,7 @@ async fn handle_heads_up(
 	let now = SystemTime::now();
 
 	for active_pvf in active_pvfs {
-		let artifact_id = active_pvf.to_artifact_id();
+		let artifact_id = active_pvf.as_artifact_id();
 		match artifacts.artifacts.entry(artifact_id.clone()) {
 			Entry::Occupied(mut o) => {
 				match o.get_mut() {
@@ -544,7 +544,7 @@ mod tests {
 
 	/// Creates a new pvf which artifact id can be uniquely identified by the given number.
 	fn artifact_id(descriminator: u32) -> ArtifactId {
-		Pvf::from_discriminator(descriminator).to_artifact_id()
+		Pvf::from_discriminator(descriminator).as_artifact_id()
 	}
 
 	fn artifact_path(descriminator: u32) -> PathBuf {
