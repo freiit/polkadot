@@ -346,23 +346,25 @@ async fn handle_execute_pvf(
 			} => {
 				*last_time_needed = SystemTime::now();
 
-				execute_queue
-					.send(execute::ToQueue::Enqueue {
+				send_execute(
+					execute_queue,
+					execute::ToQueue::Enqueue {
 						artifact_path: artifact_path.clone(),
 						params,
 						result_tx,
-					})
-					.await
-					.map_err(|_| Fatal)?;
+					},
+				)
+				.await?;
 			}
 			ArtifactState::Preparing => {
-				prepare_queue
-					.send(prepare::ToQueue::Amend {
+				send_prepare(
+					prepare_queue,
+					prepare::ToQueue::Amend {
 						priority,
 						artifact_id: pvf.as_artifact_id(),
-					})
-					.await
-					.map_err(|_| Fatal)?;
+					},
+				)
+				.await?;
 
 				awaiting_prepare
 					.entry(artifact_id)
@@ -371,10 +373,7 @@ async fn handle_execute_pvf(
 			}
 		},
 		Entry::Vacant(v) => {
-			prepare_queue
-				.send(prepare::ToQueue::Enqueue { priority, pvf })
-				.await
-				.map_err(|_| Fatal)?;
+			send_prepare(prepare_queue, prepare::ToQueue::Enqueue { priority, pvf }).await?;
 
 			v.insert(ArtifactState::Preparing);
 			awaiting_prepare
@@ -413,13 +412,14 @@ async fn handle_heads_up(
 			Entry::Vacant(v) => {
 				v.insert(ArtifactState::Preparing);
 
-				prepare_queue
-					.send(prepare::ToQueue::Enqueue {
+				send_prepare(
+					prepare_queue,
+					prepare::ToQueue::Enqueue {
 						priority: Priority::Background,
 						pvf: active_pvf,
-					})
-					.await
-					.map_err(|_| Fatal)?;
+					},
+				)
+				.await?;
 			}
 		}
 	}
@@ -440,14 +440,15 @@ async fn handle_prepare_done(
 		ArtifactState::Preparing => {
 			let pending_requests = awaiting_prepare.remove(&artifact_id).unwrap_or_default();
 			for PendingExecutionRequest { params, result_tx } in pending_requests {
-				execute_queue
-					.send(execute::ToQueue::Enqueue {
+				send_execute(
+					execute_queue,
+					execute::ToQueue::Enqueue {
 						artifact_path: artifact_path.clone(),
 						params,
 						result_tx,
-					})
-					.await
-					.map_err(|_| Fatal)?;
+					},
+				)
+				.await?;
 			}
 		}
 		_ => panic!(), // TODO:
@@ -462,6 +463,20 @@ async fn handle_prepare_done(
 	);
 
 	Ok(())
+}
+
+async fn send_prepare(
+	prepare_queue: &mut mpsc::Sender<prepare::ToQueue>,
+	to_queue: prepare::ToQueue,
+) -> Result<(), Fatal> {
+	prepare_queue.send(to_queue).await.map_err(|_| Fatal)
+}
+
+async fn send_execute(
+	execute_queue: &mut mpsc::Sender<execute::ToQueue>,
+	to_queue: execute::ToQueue,
+) -> Result<(), Fatal> {
+	execute_queue.send(to_queue).await.map_err(|_| Fatal)
 }
 
 async fn handle_cleanup_pulse(
