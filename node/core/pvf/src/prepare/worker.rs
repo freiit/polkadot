@@ -31,7 +31,7 @@ use futures::FutureExt as _;
 use futures_timer::Delay;
 use std::{sync::Arc, time::Duration};
 
-const NICENESS_BACKGROUND: i32 = 5;
+const NICENESS_BACKGROUND: i32 = 10;
 const NICENESS_FOREGROUND: i32 = 0;
 
 pub async fn spawn(
