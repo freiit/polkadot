@@ -276,7 +276,7 @@ async fn handle_amend(
 				}
 			}
 
-			job_data.priority = dbg!(priority);
+			job_data.priority = priority;
 		}
 	}
 
@@ -298,7 +298,6 @@ async fn handle_worker_spawned(queue: &mut Queue, worker: Worker) -> Result<(), 
 	queue.spawn_inflight -= 1;
 
 	if let Some(job) = queue.unscheduled.next() {
-		dbg!(&job);
 		assign(queue, worker, job).await?;
 	}
 
@@ -386,7 +385,7 @@ async fn assign(queue: &mut Queue, worker: Worker, job: Job) -> Result<(), Fatal
 	let artifact_id = job_data.pvf.as_artifact_id();
 	let artifact_path = artifact_id.path(&queue.cache_path);
 
-	job_data.worker = dbg!(Some(worker));
+	job_data.worker = Some(worker);
 
 	queue.workers[worker].job = Some(job);
 
@@ -396,7 +395,7 @@ async fn assign(queue: &mut Queue, worker: Worker, job: Job) -> Result<(), Fatal
 			worker,
 			code: job_data.pvf.code.clone(),
 			artifact_path,
-			background_priority: dbg!(job_data.priority.is_background()),
+			background_priority: job_data.priority.is_background(),
 		},
 	)
 	.await?;

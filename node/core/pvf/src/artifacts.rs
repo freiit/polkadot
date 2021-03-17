@@ -15,9 +15,16 @@
 // along with Polkadot.  If not, see <http://www.gnu.org/licenses/>.
 
 use crate::LOG_TARGET;
-use async_std::path::{Path, PathBuf};
+use always_assert::always;
+use async_std::{
+	io,
+	path::{Path, PathBuf},
+};
 use polkadot_core_primitives::Hash;
-use std::{collections::HashMap, time::SystemTime};
+use std::{
+	collections::HashMap,
+	time::{Duration, SystemTime},
+};
 use parity_scale_codec::{Encode, Decode};
 use futures::StreamExt;
 
@@ -76,35 +83,22 @@ impl ArtifactId {
 
 pub enum ArtifactState {
 	/// The artifact is ready to be used by the executor.
+	///
+	/// That means that the artifact should be accessible through the path obtained by the artifact
+	/// id under (unless, it was removed externally).
 	Prepared {
 		/// The time when the artifact was the last time needed.
 		///
 		/// This is updated when we get the heads up for this artifact or when we just discover
 		/// this file.
 		last_time_needed: SystemTime,
-
-		/// The path under which the artifact is saved on the FS.
-		artifact_path: PathBuf,
 	},
 	/// A task to prepare this artifact is scheduled.
 	Preparing,
 }
 
-impl ArtifactState {
-	pub fn into_prepared(self) -> Option<(SystemTime, PathBuf)> {
-		match self {
-			ArtifactState::Prepared {
-				last_time_needed,
-				artifact_path,
-			} => Some((last_time_needed, artifact_path)),
-			ArtifactState::Preparing => None,
-		}
-	}
-}
-
 pub struct Artifacts {
-	// TODO: remove pub
-	pub artifacts: HashMap<ArtifactId, ArtifactState>,
+	artifacts: HashMap<ArtifactId, ArtifactState>,
 }
 
 impl Artifacts {
@@ -130,11 +124,52 @@ impl Artifacts {
 			artifacts: HashMap::new(),
 		}
 	}
+
+	pub fn artifact_state_mut(&mut self, artifact_id: &ArtifactId) -> Option<&mut ArtifactState> {
+		self.artifacts.get_mut(artifact_id)
+	}
+
+	pub fn insert_preparing(&mut self, artifact_id: ArtifactId) {
+		always!(self
+			.artifacts
+			.insert(artifact_id, ArtifactState::Preparing)
+			.is_none());
+	}
+
+	#[cfg(test)]
+	pub fn insert_prepared(&mut self, artifact_id: ArtifactId, last_time_needed: SystemTime) {
+		always!(self
+			.artifacts
+			.insert(artifact_id, ArtifactState::Prepared { last_time_needed })
+			.is_none());
+	}
+
+	pub fn prune(&mut self, artifact_ttl: Duration) -> Vec<ArtifactId> {
+		let now = SystemTime::now();
+
+		let mut to_remove = vec![];
+		for (k, v) in self.artifacts.iter() {
+			if let ArtifactState::Prepared {
+				last_time_needed, ..
+			} = *v
+			{
+				if now
+					.duration_since(last_time_needed)
+					.map(|age| age > artifact_ttl)
+					.unwrap_or(false)
+				{
+					to_remove.push(k.clone());
+				}
+			}
+		}
+
+		to_remove
+	}
 }
 
 async fn scan_for_known_artifacts(
 	cache_path: &Path,
-) -> async_std::io::Result<HashMap<ArtifactId, ArtifactState>> {
+) -> io::Result<HashMap<ArtifactId, ArtifactState>> {
 	let mut result = HashMap::new();
 
 	let mut dir = async_std::fs::read_dir(cache_path).await?;
@@ -185,13 +220,15 @@ async fn scan_for_known_artifacts(
 			Some(artifact_id) => artifact_id,
 		};
 
-		result.insert(
-			artifact_id,
-			ArtifactState::Prepared {
-				last_time_needed: SystemTime::now(),
-				artifact_path: path,
-			},
-		);
+		// A sanity check so that we really can access the artifact through the artifact id.
+		if always!(artifact_id.path(cache_path).is_file().await) {
+			result.insert(
+				artifact_id,
+				ArtifactState::Prepared {
+					last_time_needed: SystemTime::now(),
+				},
+			);
+		}
 	}
 
 	Ok(result)

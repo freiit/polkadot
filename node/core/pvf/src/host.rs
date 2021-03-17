@@ -20,9 +20,10 @@ use crate::{
 	execute, prepare,
 };
 use std::{
-	collections::{HashMap, hash_map::Entry},
+	collections::HashMap,
 	time::{Duration, SystemTime},
 };
+use always_assert::never;
 use async_std::{
 	path::{Path, PathBuf},
 	sync::Mutex,
@@ -156,7 +157,7 @@ pub fn start(config: Config) -> (ValidationHost, impl Future<Output = ()>) {
 				from_prepare_queue_rx,
 				to_execute_queue_tx,
 				to_sweeper_tx,
-				awaiting_prepare: HashMap::new(),
+				awaiting_prepare: AwaitingPrepare::default(),
 			},
 			run_prepare_pool,
 			run_prepare_queue,
@@ -175,6 +176,27 @@ struct PendingExecutionRequest {
 	result_tx: oneshot::Sender<Result<ValidationResult, ValidationError>>,
 }
 
+#[derive(Default)]
+struct AwaitingPrepare(HashMap<ArtifactId, Vec<PendingExecutionRequest>>);
+
+impl AwaitingPrepare {
+	fn add(
+		&mut self,
+		artifact_id: ArtifactId,
+		params: Vec<u8>,
+		result_tx: oneshot::Sender<Result<ValidationResult, ValidationError>>,
+	) {
+		self.0
+			.entry(artifact_id)
+			.or_default()
+			.push(PendingExecutionRequest { params, result_tx });
+	}
+
+	fn take(&mut self, artifact_id: &ArtifactId) -> Vec<PendingExecutionRequest> {
+		self.0.remove(artifact_id).unwrap_or_default()
+	}
+}
+
 struct Inner {
 	cache_path: PathBuf,
 	cleanup_pulse_interval: Duration,
@@ -189,7 +211,7 @@ struct Inner {
 	to_execute_queue_tx: mpsc::Sender<execute::ToQueue>,
 	to_sweeper_tx: mpsc::Sender<PathBuf>,
 
-	awaiting_prepare: HashMap<ArtifactId, Vec<PendingExecutionRequest>>,
+	awaiting_prepare: AwaitingPrepare,
 }
 
 #[derive(Debug)]
@@ -250,15 +272,17 @@ async fn run(
 			},
 			() = cleanup_pulse.select_next_some() => {
 				break_if_fatal!(handle_cleanup_pulse(
+					&cache_path,
 					&mut to_sweeper_tx,
 					&mut artifacts,
-					&artifact_ttl,
+					artifact_ttl,
 				).await);
 			},
 			to_host = to_host_rx.next() => {
 				let to_host = break_if_fatal!(to_host.ok_or(Fatal));
 
 				break_if_fatal!(handle_to_host(
+					&cache_path,
 					&mut artifacts,
 					&mut to_prepare_queue_tx,
 					&mut to_execute_queue_tx,
@@ -293,10 +317,11 @@ async fn run(
 }
 
 async fn handle_to_host(
+	cache_path: &Path,
 	artifacts: &mut Artifacts,
 	prepare_queue: &mut mpsc::Sender<prepare::ToQueue>,
 	execute_queue: &mut mpsc::Sender<execute::ToQueue>,
-	awaiting_prepare: &mut HashMap<ArtifactId, Vec<PendingExecutionRequest>>,
+	awaiting_prepare: &mut AwaitingPrepare,
 	to_host: ToHost,
 ) -> Result<(), Fatal> {
 	match to_host {
@@ -307,6 +332,7 @@ async fn handle_to_host(
 			result_tx,
 		} => {
 			handle_execute_pvf(
+				cache_path,
 				artifacts,
 				prepare_queue,
 				execute_queue,
@@ -327,10 +353,11 @@ async fn handle_to_host(
 }
 
 async fn handle_execute_pvf(
+	cache_path: &Path,
 	artifacts: &mut Artifacts,
 	prepare_queue: &mut mpsc::Sender<prepare::ToQueue>,
 	execute_queue: &mut mpsc::Sender<execute::ToQueue>,
-	awaiting_prepare: &mut HashMap<ArtifactId, Vec<PendingExecutionRequest>>,
+	awaiting_prepare: &mut AwaitingPrepare,
 	pvf: Pvf,
 	params: Vec<u8>,
 	priority: Priority,
@@ -338,10 +365,9 @@ async fn handle_execute_pvf(
 ) -> Result<(), Fatal> {
 	let artifact_id = pvf.as_artifact_id();
 
-	match artifacts.artifacts.entry(artifact_id.clone()) {
-		Entry::Occupied(mut o) => match *o.get_mut() {
+	if let Some(state) = artifacts.artifact_state_mut(&artifact_id) {
+		match state {
 			ArtifactState::Prepared {
-				ref artifact_path,
 				ref mut last_time_needed,
 			} => {
 				*last_time_needed = SystemTime::now();
@@ -349,7 +375,7 @@ async fn handle_execute_pvf(
 				send_execute(
 					execute_queue,
 					execute::ToQueue::Enqueue {
-						artifact_path: artifact_path.clone(),
+						artifact_path: artifact_id.path(cache_path),
 						params,
 						result_tx,
 					},
@@ -361,29 +387,24 @@ async fn handle_execute_pvf(
 					prepare_queue,
 					prepare::ToQueue::Amend {
 						priority,
-						artifact_id: pvf.as_artifact_id(),
+						artifact_id: artifact_id.clone(),
 					},
 				)
 				.await?;
 
-				awaiting_prepare
-					.entry(artifact_id)
-					.or_default()
-					.push(PendingExecutionRequest { params, result_tx });
+				awaiting_prepare.add(artifact_id, params, result_tx);
 			}
-		},
-		Entry::Vacant(v) => {
-			send_prepare(prepare_queue, prepare::ToQueue::Enqueue { priority, pvf }).await?;
-
-			v.insert(ArtifactState::Preparing);
-			awaiting_prepare
-				.entry(artifact_id)
-				.or_default()
-				.push(PendingExecutionRequest { params, result_tx });
 		}
+	} else {
+		// Artifact is unknown: register it and enqueue a job with the corresponding priority and
+		//
+		artifacts.insert_preparing(artifact_id.clone());
+		send_prepare(prepare_queue, prepare::ToQueue::Enqueue { priority, pvf }).await?;
+
+		awaiting_prepare.add(artifact_id, params, result_tx);
 	}
 
-	Ok(())
+	return Ok(());
 }
 
 async fn handle_heads_up(
@@ -395,32 +416,30 @@ async fn handle_heads_up(
 
 	for active_pvf in active_pvfs {
 		let artifact_id = active_pvf.as_artifact_id();
-		match artifacts.artifacts.entry(artifact_id.clone()) {
-			Entry::Occupied(mut o) => {
-				match o.get_mut() {
-					ArtifactState::Prepared {
-						last_time_needed, ..
-					} => {
-						*last_time_needed = now.clone();
-					}
-					ArtifactState::Preparing => {
-						// Already preparing. We don't need to send a priority amend either because
-						// it can't get any lower than the background.
-					}
+		if let Some(state) = artifacts.artifact_state_mut(&artifact_id) {
+			match state {
+				ArtifactState::Prepared {
+					last_time_needed, ..
+				} => {
+					*last_time_needed = now.clone();
+				}
+				ArtifactState::Preparing => {
+					// Already preparing. We don't need to send a priority amend either because
+					// it can't get any lower than the background.
 				}
 			}
-			Entry::Vacant(v) => {
-				v.insert(ArtifactState::Preparing);
+		} else {
+			// The artifact is unknown: register it and put a background job into the prepare queue.
+			artifacts.insert_preparing(artifact_id.clone());
 
-				send_prepare(
-					prepare_queue,
-					prepare::ToQueue::Enqueue {
-						priority: Priority::Background,
-						pvf: active_pvf,
-					},
-				)
-				.await?;
-			}
+			send_prepare(
+				prepare_queue,
+				prepare::ToQueue::Enqueue {
+					priority: Priority::Background,
+					pvf: active_pvf,
+				},
+			)
+			.await?;
 		}
 	}
 
@@ -431,36 +450,42 @@ async fn handle_prepare_done(
 	cache_path: &Path,
 	artifacts: &mut Artifacts,
 	execute_queue: &mut mpsc::Sender<execute::ToQueue>,
-	awaiting_prepare: &mut HashMap<ArtifactId, Vec<PendingExecutionRequest>>,
+	awaiting_prepare: &mut AwaitingPrepare,
 	artifact_id: ArtifactId,
 ) -> Result<(), Fatal> {
-	let artifact_path = artifact_id.path(&cache_path);
-	let artifact_state = artifacts.artifacts.remove(&artifact_id).unwrap(); // TODO:
-	match artifact_state {
-		ArtifactState::Preparing => {
-			let pending_requests = awaiting_prepare.remove(&artifact_id).unwrap_or_default();
-			for PendingExecutionRequest { params, result_tx } in pending_requests {
-				send_execute(
-					execute_queue,
-					execute::ToQueue::Enqueue {
-						artifact_path: artifact_path.clone(),
-						params,
-						result_tx,
-					},
-				)
-				.await?;
-			}
+	// Make some sanity checks and extract the current state.
+	let state = match artifacts.artifact_state_mut(&artifact_id) {
+		None => {
+			never!("an unknown artifact was prepared: {:?}", artifact_id);
+			return Ok(());
 		}
-		_ => panic!(), // TODO:
+		Some(ArtifactState::Prepared { .. }) => {
+			never!("the artifact is already prepared: {:?}", artifact_id);
+			return Ok(());
+		}
+		Some(state @ ArtifactState::Preparing) => state,
+	};
+
+	// It's finally time to dispatch all the execution requests that were waiting for this artifact
+	// to be prepared.
+	let artifact_path = artifact_id.path(&cache_path);
+	let pending_requests = awaiting_prepare.take(&artifact_id);
+	for PendingExecutionRequest { params, result_tx } in pending_requests {
+		send_execute(
+			execute_queue,
+			execute::ToQueue::Enqueue {
+				artifact_path: artifact_path.clone(),
+				params,
+				result_tx,
+			},
+		)
+		.await?;
 	}
 
-	artifacts.artifacts.insert(
-		artifact_id,
-		ArtifactState::Prepared {
-			last_time_needed: SystemTime::now(),
-			artifact_path,
-		},
-	);
+	// Now consider the artifact prepared.
+	*state = ArtifactState::Prepared {
+		last_time_needed: SystemTime::now(),
+	};
 
 	Ok(())
 }
@@ -480,36 +505,14 @@ async fn send_execute(
 }
 
 async fn handle_cleanup_pulse(
+	cache_path: &Path,
 	sweeper_tx: &mut mpsc::Sender<PathBuf>,
 	artifacts: &mut Artifacts,
-	artifact_ttl: &Duration,
+	artifact_ttl: Duration,
 ) -> Result<(), Fatal> {
-	let now = std::time::SystemTime::now();
-
-	let mut to_remove = vec![];
-	for (k, v) in artifacts.artifacts.iter() {
-		if let ArtifactState::Prepared {
-			last_time_needed, ..
-		} = *v
-		{
-			if now
-				.duration_since(last_time_needed)
-				.map(|age| age > *artifact_ttl)
-				.unwrap_or(false)
-			{
-				to_remove.push(dbg!(k.clone()));
-			}
-		}
-	}
-
-	for k in to_remove {
-		let (_, artifact_path) = artifacts
-			.artifacts
-			.remove(&k)
-			.expect("k is from to_remove; to_remove is based on the actual kv pairs; qed")
-			.into_prepared()
-			.expect("k is from to_remove; to_remove consists of prepared artifacts; qed");
-
+	let to_remove = artifacts.prune(artifact_ttl);
+	for artifact_id in to_remove {
+		let artifact_path = artifact_id.path(cache_path);
 		sweeper_tx.send(artifact_path).await.map_err(|_| Fatal)?;
 	}
 
@@ -632,7 +635,7 @@ mod tests {
 					from_prepare_queue_rx,
 					to_execute_queue_tx,
 					to_sweeper_tx,
-					awaiting_prepare: HashMap::new(),
+					awaiting_prepare: AwaitingPrepare::default(),
 				},
 				mk_dummy_loop(),
 				mk_dummy_loop(),
@@ -703,20 +706,8 @@ mod tests {
 		let mut builder = Builder::default();
 		builder.cleanup_pulse_interval = Duration::from_millis(100);
 		builder.artifact_ttl = Duration::from_millis(500);
-		builder.artifacts.artifacts.insert(
-			artifact_id(1),
-			ArtifactState::Prepared {
-				last_time_needed: mock_now,
-				artifact_path: artifact_path(1),
-			},
-		);
-		builder.artifacts.artifacts.insert(
-			artifact_id(2),
-			ArtifactState::Prepared {
-				last_time_needed: mock_now,
-				artifact_path: artifact_path(2),
-			},
-		);
+		builder.artifacts.insert_prepared(artifact_id(1), mock_now);
+		builder.artifacts.insert_prepared(artifact_id(2), mock_now);
 		let mut test = builder.build();
 		let host = test.host_handle();
 
