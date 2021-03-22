@@ -21,7 +21,7 @@ use crate::{LOG_TARGET, Priority, Pvf, artifacts::ArtifactId};
 use futures::{Future, SinkExt, channel::mpsc, stream::StreamExt as _};
 use std::collections::{HashMap, VecDeque};
 use async_std::path::PathBuf;
-use always_assert::never;
+use always_assert::{always, never};
 
 #[derive(Debug)]
 pub enum ToQueue {
@@ -114,6 +114,10 @@ impl Unscheduled {
 
 	fn readd(&mut self, prio: Priority, job: Job) {
 		self.queue_mut(prio).push_front(job);
+	}
+
+	fn is_empty(&self) -> bool {
+		self.background.is_empty() && self.normal.is_empty() && self.critical.is_empty()
 	}
 
 	fn next(&mut self) -> Option<Job> {
@@ -214,8 +218,6 @@ async fn handle_to_queue(queue: &mut Queue, to_queue: ToQueue) -> Result<(), Fat
 }
 
 async fn handle_enqueue(queue: &mut Queue, priority: Priority, pvf: Pvf) -> Result<(), Fatal> {
-	println!("enque");
-
 	let artifact_id = pvf.as_artifact_id();
 	if never!(queue.artifact_id_to_job.contains_key(&artifact_id)) {
 		// We already know about this artifact yet it was still enqueued.
@@ -235,7 +237,8 @@ async fn handle_enqueue(queue: &mut Queue, priority: Priority, pvf: Pvf) -> Resu
 	queue.artifact_id_to_job.insert(artifact_id, job);
 
 	if let Some(available) = find_idle_worker(queue) {
-		// TODO: Explain, why this should be fair, i.e. that the work won't be handled out of order.
+		// This may seem not fair (w.r.t priority) on the first glance, but it should be. This is
+		// because as soon as a worker finishes with the job it's immediatelly given the next one.
 		assign(queue, available, job).await?;
 	} else {
 		spawn_extra_worker(queue, priority.is_critical()).await?;
@@ -287,7 +290,7 @@ async fn handle_from_pool(queue: &mut Queue, from_pool: pool::FromPool) -> Resul
 	use pool::FromPool::*;
 	match from_pool {
 		Spawned(worker) => handle_worker_spawned(queue, worker).await?,
-		Concluded(worker) => handle_worker_concluded(queue, worker).await?,
+		Concluded(worker, rip) => handle_worker_concluded(queue, worker, rip).await?,
 		Rip(worker) => handle_worker_rip(queue, worker).await?,
 	}
 	Ok(())
@@ -304,7 +307,11 @@ async fn handle_worker_spawned(queue: &mut Queue, worker: Worker) -> Result<(), 
 	Ok(())
 }
 
-async fn handle_worker_concluded(queue: &mut Queue, worker: Worker) -> Result<(), Fatal> {
+async fn handle_worker_concluded(
+	queue: &mut Queue,
+	worker: Worker,
+	rip: bool,
+) -> Result<(), Fatal> {
 	macro_rules! never_none {
 		($expr:expr) => {
 			match $expr {
@@ -327,17 +334,24 @@ async fn handle_worker_concluded(queue: &mut Queue, worker: Worker) -> Result<()
 
 	reply(&mut queue.from_queue_tx, FromQueue::Prepared(artifact_id))?;
 
-	if queue
-		.limits
-		.should_cull(queue.workers.len() + queue.spawn_inflight)
-	{
-		// We no longer need services of this worker. Kill it.
-		queue.workers.remove(worker);
-		send_pool(&mut queue.to_pool_tx, pool::ToPool::Kill(worker)).await?;
+	// Figure out what to do with the worker.
+	if rip {
+		let worker_data = remove_dead_worker(queue, worker).await?;
+		// worker should exist, it's asserted above.
+		always!(worker_data.is_some());
 	} else {
-		// see if there are more work available and schedule it.
-		if let Some(job) = queue.unscheduled.next() {
-			assign(queue, worker, job).await?;
+		if queue
+			.limits
+			.should_cull(queue.workers.len() + queue.spawn_inflight)
+		{
+			// We no longer need services of this worker. Kill it.
+			queue.workers.remove(worker);
+			send_pool(&mut queue.to_pool_tx, pool::ToPool::Kill(worker)).await?;
+		} else {
+			// see if there are more work available and schedule it.
+			if let Some(job) = queue.unscheduled.next() {
+				assign(queue, worker, job).await?;
+			}
 		}
 	}
 
@@ -345,26 +359,38 @@ async fn handle_worker_concluded(queue: &mut Queue, worker: Worker) -> Result<()
 }
 
 async fn handle_worker_rip(queue: &mut Queue, worker: Worker) -> Result<(), Fatal> {
-	let worker = match queue.workers.remove(worker) {
-		None => {
-			// That's fine. This can happen when we wanted to kill the worker but it died naturally
-			// before us receiving the message.
-			return Ok(());
-		}
-		Some(w) => w,
-	};
+	let worker_data = queue.workers.remove(worker);
 
-	if let Some(job) = worker.job {
-		let job_data = &mut queue.jobs[job];
+	if let Some(WorkerData { job: Some(job), .. }) = worker_data {
+		// This is an edge case where the worker ripped after we send assignment but before it
+		// was received by the pool.
+		let priority = queue.jobs.get(job).map(|data| data.priority).unwrap_or_else(|| {
+			never!();
+			Priority::Normal
+		});
+		queue.unscheduled.readd(priority, job);
+	}
 
-		queue.unscheduled.readd(job_data.priority, job);
+	// If there are still jobs left, spawn another worker to replace the ripped one (but only if it
+	// was indeed removed). That is unconditionally not critical just to not accidentally fill up
+	// the pool up to the hard cap.
+	if worker_data.is_some() && !queue.unscheduled.is_empty() {
+		spawn_extra_worker(queue, false).await?;
+	}
+	Ok(())
+}
 
-		// Spawn another worker to replace the ripped one. That unconditionally is not critical
-		// even though the job might have been, just to not accidentally fill up the whole pool.
+async fn remove_dead_worker(queue: &mut Queue, worker: Worker) -> Result<Option<WorkerData>, Fatal> {
+	let worker_data = queue.workers.remove(worker);
+
+	// If there are still jobs left, spawn another worker to replace the ripped one (but only if it
+	// was indeed removed). That is unconditionally not critical just to not accidentally fill up
+	// the pool up to the hard cap.
+	if worker_data.is_some() && !queue.unscheduled.is_empty() {
 		spawn_extra_worker(queue, false).await?;
 	}
 
-	Ok(())
+	Ok(worker_data)
 }
 
 async fn spawn_extra_worker(queue: &mut Queue, critical: bool) -> Result<(), Fatal> {
@@ -455,9 +481,6 @@ mod tests {
 	use futures::{FutureExt, future::BoxFuture};
 	use std::task::Poll;
 	use super::*;
-
-	// TODO: respects priority for unscheduled
-	// TODO: immune to rips
 
 	/// Creates a new pvf which artifact id can be uniquely identified by the given number.
 	fn pvf(descriminator: u32) -> Pvf {
@@ -558,6 +581,25 @@ mod tests {
 			)
 			.await
 		}
+
+		async fn poll_ensure_to_pool_is_empty(&mut self) {
+			use futures_timer::Delay;
+			use std::time::Duration;
+
+			let to_pool_rx = &mut self.to_pool_rx;
+			run_until(
+				&mut self.run,
+				async {
+					futures::select! {
+						_ = Delay::new(Duration::from_millis(500)).fuse() => (),
+						_ = to_pool_rx.next().fuse() => {
+							panic!()
+						}
+					}
+				}.boxed(),
+			)
+			.await
+		}
 	}
 
 	#[async_std::test]
@@ -572,7 +614,7 @@ mod tests {
 
 		let w = test.workers.insert(());
 		test.send_from_pool(pool::FromPool::Spawned(w));
-		test.send_from_pool(pool::FromPool::Concluded(w));
+		test.send_from_pool(pool::FromPool::Concluded(w, false));
 
 		assert_eq!(
 			test.poll_and_recv_from_queue().await,
@@ -617,7 +659,7 @@ mod tests {
 			pool::ToPool::StartWork { .. }
 		);
 
-		test.send_from_pool(pool::FromPool::Concluded(w1));
+		test.send_from_pool(pool::FromPool::Concluded(w1, false));
 
 		assert_matches!(
 			test.poll_and_recv_to_pool().await,
@@ -665,7 +707,7 @@ mod tests {
 		// That's a bit silly in this context, but in production there will be an entire pool up
 		// to the `soft_capacity` of workers and it doesn't matter which one to cull. Either way,
 		// we just check that edge case of an edge case works.
-		test.send_from_pool(pool::FromPool::Concluded(w1));
+		test.send_from_pool(pool::FromPool::Concluded(w1, false));
 		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Kill(w1));
 	}
 
@@ -695,6 +737,106 @@ mod tests {
 		assert_eq!(
 			test.poll_and_recv_to_pool().await,
 			pool::ToPool::BumpPriority(w)
+		);
+	}
+
+	#[async_std::test]
+	async fn worker_mass_die_out_doesnt_stall_queue() {
+		let mut test = Test::new(2, 2);
+
+		test.send_queue(ToQueue::Enqueue {
+			priority: Priority::Normal,
+			pvf: pvf(1),
+		});
+		test.send_queue(ToQueue::Enqueue {
+			priority: Priority::Normal,
+			pvf: pvf(2),
+		});
+		test.send_queue(ToQueue::Enqueue {
+			priority: Priority::Normal,
+			pvf: pvf(3),
+		});
+
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+
+		let w1 = test.workers.insert(());
+		let w2 = test.workers.insert(());
+
+		test.send_from_pool(pool::FromPool::Spawned(w1));
+		test.send_from_pool(pool::FromPool::Spawned(w2));
+
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
+
+		// Conclude worker 1 and rip it.
+		test.send_from_pool(pool::FromPool::Concluded(w1, true));
+
+		// Since there is still work, the queue requested one extra worker to spawn to handle the
+		// remaining enqueued work items.
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+		assert_eq!(test.poll_and_recv_from_queue().await, FromQueue::Prepared(pvf(1).as_artifact_id()));
+	}
+
+	#[async_std::test]
+	async fn doesnt_resurrect_ripped_worker_if_no_work() {
+		let mut test = Test::new(2, 2);
+
+		test.send_queue(ToQueue::Enqueue {
+			priority: Priority::Normal,
+			pvf: pvf(1),
+		});
+
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+
+		let w1 = test.workers.insert(());
+		test.send_from_pool(pool::FromPool::Spawned(w1));
+
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
+
+		test.send_from_pool(pool::FromPool::Concluded(w1, true));
+		test.poll_ensure_to_pool_is_empty().await;
+	}
+
+	#[async_std::test]
+	async fn rip_for_start_work() {
+		let mut test = Test::new(2, 2);
+
+		test.send_queue(ToQueue::Enqueue {
+			priority: Priority::Normal,
+			pvf: pvf(1),
+		});
+
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+
+		let w1 = test.workers.insert(());
+		test.send_from_pool(pool::FromPool::Spawned(w1));
+
+		// Now, to the interesting part. After the queue normally issues the start_work command to
+		// the pool, before receiving the command the queue may report that the worker ripped.
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
+		);
+		test.send_from_pool(pool::FromPool::Rip(w1));
+
+		// In this case, the pool should spawn a new worker and request it to work on the item.
+		assert_eq!(test.poll_and_recv_to_pool().await, pool::ToPool::Spawn);
+
+		let w2 = test.workers.insert(());
+		test.send_from_pool(pool::FromPool::Spawned(w2));
+		assert_matches!(
+			test.poll_and_recv_to_pool().await,
+			pool::ToPool::StartWork { .. }
 		);
 	}
 }

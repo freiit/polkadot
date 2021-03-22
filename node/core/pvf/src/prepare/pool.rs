@@ -59,8 +59,7 @@ pub enum ToPool {
 
 	/// Request the given worker to start working on the given code.
 	///
-	/// Once the job either succeeded or failed, a [`FromPool::Concluded`] message will be sent back,
-	/// unless the worker died meanwhile, in which case [`FromPool::Rip`] will be sent earlier.
+	/// Once the job either succeeded or failed, a [`FromPool::Concluded`] message will be sent back.
 	StartWork {
 		worker: Worker,
 		code: Arc<Vec<u8>>,
@@ -75,8 +74,8 @@ pub enum FromPool {
 	Spawned(Worker),
 
 	/// The given worker either succeeded or failed the given job. Under any circumstances the
-	/// artifact file has been written.
-	Concluded(Worker),
+	/// artifact file has been written. The bool says whether the worker ripped.
+	Concluded(Worker, bool),
 
 	/// The given worker ceased to exist.
 	Rip(Worker),
@@ -158,6 +157,13 @@ async fn purge_dead(
 ) -> Result<(), Fatal> {
 	let mut to_remove = vec![];
 	for (worker, data) in spawned.iter_mut() {
+		if data.idle.is_none() {
+			// The idle token is missing, meaning this worker is now occupied: skip it. This is
+			// because the worker process is observed by the work task and should it reach the
+			// deadline or be terminated it will be handled by the corresponding mux event.
+			continue;
+		}
+
 		if let Poll::Ready(()) = futures::poll!(&mut data.handle) {
 			// a resolved future means that the worker has terminated. Weed it out.
 			to_remove.push(worker);
@@ -197,7 +203,8 @@ fn handle_to_pool(
 					never!();
 				}
 			} else {
-				never!();
+				// That's a relatively normal situation since the queue may send `start_work` and
+				// before receiving it the pool would report that the worker died.
 			}
 		}
 		ToPool::Kill(worker) => {
@@ -278,14 +285,13 @@ fn handle_mux(
 					let old = data.idle.replace(idle);
 					assert_matches!(old, None, "attempt to overwrite an idle worker");
 
-					reply(from_pool, FromPool::Concluded(worker))?;
+					reply(from_pool, FromPool::Concluded(worker, false))?;
 
 					Ok(())
 				}
 				Outcome::DidntMakeIt => {
 					if let Some(_data) = spawned.remove(worker) {
-						reply(from_pool, FromPool::Concluded(worker))?;
-						reply(from_pool, FromPool::Rip(worker))?;
+						reply(from_pool, FromPool::Concluded(worker, true))?;
 					}
 
 					Ok(())
