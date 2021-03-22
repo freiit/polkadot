@@ -49,7 +49,7 @@ impl Pvf {
 	}
 
 	/// Returns the artifact ID that corresponds to this PVF.
-	pub fn as_artifact_id(&self) -> ArtifactId {
+	pub(crate) fn as_artifact_id(&self) -> ArtifactId {
 		ArtifactId::new(self.code_hash.clone())
 	}
 }

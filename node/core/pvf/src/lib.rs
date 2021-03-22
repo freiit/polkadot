@@ -38,8 +38,4 @@ pub mod integration_test {
 	pub mod worker_common {
 		pub use crate::worker_common::{spawn_with_program_path, SpawnErr};
 	}
-
-	pub mod prepare {
-
-	}
 }
