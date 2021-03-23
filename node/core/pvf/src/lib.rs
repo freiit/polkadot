@@ -33,6 +33,7 @@ pub use prepare::worker_entrypoint as prepare_worker_entrypoint;
 
 const LOG_TARGET: &str = "parachain::pvf";
 
+/// Exports for integration tests.
 #[doc(hidden)]
 pub mod integration_test {
 	pub mod worker_common {

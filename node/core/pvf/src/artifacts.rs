@@ -81,6 +81,19 @@ impl ArtifactId {
 	}
 }
 
+#[test]
+fn ensure_wasmtime_version() {
+	assert_eq!(
+		wasmtime_jit::VERSION,
+		"0.22.0",
+		"wasmtime version is updated. Check the prefix.",
+	);
+	// If the version bump is significant, change `ArtifactId::PREFIX`.
+	//
+	// If in doubt bump it. This will lead to removal of the existing artifacts in the on-disk cache
+	// and recompilation.
+}
+
 pub enum ArtifactState {
 	/// The artifact is ready to be used by the executor.
 	///
