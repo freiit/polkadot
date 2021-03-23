@@ -46,7 +46,7 @@ use futures_timer::Delay;
 /// How long to wait before proposing.
 const PRE_PROPOSE_TIMEOUT: std::time::Duration = core::time::Duration::from_millis(2000);
 
-const LOG_TARGET: &str = "provisioner";
+const LOG_TARGET: &str = "parachain::provisioner";
 
 enum InherentAfter {
 	Ready,
@@ -198,10 +198,10 @@ impl ProvisioningJob {
 						}
 					}
 					Some(ProvisionableData(_, data)) => {
-						let _span = span.child("provisionable-data");
+						let span = span.child("provisionable-data");
 						let _timer = self.metrics.time_provisionable_data();
 
-						self.note_provisionable_data(data);
+						self.note_provisionable_data(&span, data);
 					}
 					None => break,
 				},
@@ -239,12 +239,14 @@ impl ProvisioningJob {
 	}
 
 	#[tracing::instrument(level = "trace", skip(self), fields(subsystem = LOG_TARGET))]
-	fn note_provisionable_data(&mut self, provisionable_data: ProvisionableData) {
+	fn note_provisionable_data(&mut self, span: &jaeger::Span, provisionable_data: ProvisionableData) {
 		match provisionable_data {
 			ProvisionableData::Bitfield(_, signed_bitfield) => {
 				self.signed_bitfields.push(signed_bitfield)
 			}
 			ProvisionableData::BackedCandidate(backed_candidate) => {
+				let _span = span.child("provisionable-backed")
+					.with_para_id(backed_candidate.descriptor().para_id);
 				self.backed_candidates.push(backed_candidate)
 			}
 			_ => {}
@@ -377,7 +379,7 @@ async fn select_candidates(
 					}
 				}
 			}
-			_ => continue,
+			CoreState::Free => continue,
 		};
 
 		let validation_data = match request_persisted_validation_data(
@@ -401,7 +403,16 @@ async fn select_candidates(
 			descriptor.para_id == scheduled_core.para_id
 				&& descriptor.persisted_validation_data_hash == computed_validation_data_hash
 		}) {
-			selected_candidates.push(candidate.hash());
+			let candidate_hash = candidate.hash();
+			tracing::trace!(
+				target: LOG_TARGET,
+				"Selecting candidate {}. para_id={} core={}",
+				candidate_hash,
+				candidate.descriptor.para_id,
+				core_idx,
+			);
+
+			selected_candidates.push(candidate_hash);
 		}
 	}
 
@@ -444,6 +455,13 @@ async fn select_candidates(
 		true
 	});
 
+	tracing::debug!(
+		target: LOG_TARGET,
+		"Selected {} candidates for {} cores",
+		candidates.len(),
+		availability_cores.len(),
+	);
+
 	Ok(candidates)
 }
 
@@ -485,7 +503,7 @@ fn bitfields_indicate_availability(
 	let availability_len = availability.len();
 
 	for bitfield in bitfields {
-		let validator_idx = bitfield.validator_index() as usize;
+		let validator_idx = bitfield.validator_index().0 as usize;
 		match availability.get_mut(validator_idx) {
 			None => {
 				// in principle, this function might return a `Result<bool, Error>` so that we can more clearly express this error condition

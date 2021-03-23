@@ -129,12 +129,12 @@ impl OurView {
 	/// Creates a new instance.
 	pub fn new(heads: impl IntoIterator<Item = (Hash, Arc<jaeger::Span>)>, finalized_number: BlockNumber) -> Self {
 		let state_per_head = heads.into_iter().collect::<HashMap<_, _>>();
-
+		let view = View::new(
+			state_per_head.keys().cloned(),
+			finalized_number,
+		);
 		Self {
-			view: View {
-				heads: state_per_head.keys().cloned().collect(),
-				finalized_number,
-			},
+			view,
 			span_per_head: state_per_head,
 		}
 	}
@@ -189,7 +189,8 @@ macro_rules! our_view {
 #[derive(Default, Debug, Clone, PartialEq, Eq, Encode, Decode)]
 pub struct View {
 	/// A bounded amount of chain heads.
-	pub heads: Vec<Hash>,
+	/// Invariant: Sorted.
+	heads: Vec<Hash>,
 	/// The highest known finalized block number.
 	pub finalized_number: BlockNumber,
 }
@@ -208,11 +209,50 @@ pub struct View {
 #[macro_export]
 macro_rules! view {
 	( $( $hash:expr ),* $(,)? ) => {
-		$crate::View { heads: vec![ $( $hash.clone() ),* ], finalized_number: 0 }
+		$crate::View::new(vec![ $( $hash.clone() ),* ], 0)
 	};
 }
 
 impl View {
+	/// Construct a new view based on heads and a finalized block number.
+	pub fn new(heads: impl IntoIterator<Item=Hash>, finalized_number: BlockNumber) -> Self
+	{
+		let mut heads = heads.into_iter().collect::<Vec<Hash>>();
+		heads.sort();
+		Self {
+			heads,
+			finalized_number,
+		}
+	}
+
+	/// Start with no heads, but only a finalized block number.
+	pub fn with_finalized(finalized_number: BlockNumber) -> Self {
+		Self {
+			heads: Vec::new(),
+			finalized_number,
+		}
+	}
+
+	/// Obtain the number of heads that are in view.
+	pub fn len(&self) -> usize {
+		self.heads.len()
+	}
+
+	/// Check if the number of heads contained, is null.
+	pub fn is_empty(&self) -> bool {
+		self.heads.is_empty()
+	}
+
+	/// Obtain an iterator over all heads.
+	pub fn iter<'a>(&'a self) -> impl Iterator<Item=&'a Hash> {
+		self.heads.iter()
+	}
+
+	/// Obtain an iterator over all heads.
+	pub fn into_iter(self) -> impl Iterator<Item=Hash> {
+		self.heads.into_iter()
+	}
+
 	/// Replace `self` with `new`.
 	///
 	/// Returns an iterator that will yield all elements of `new` that were not part of `self`.
@@ -236,14 +276,19 @@ impl View {
 	pub fn contains(&self, hash: &Hash) -> bool {
 		self.heads.contains(hash)
 	}
+
+	/// Check if two views have the same heads.
+	///
+	/// Equivalent to the `PartialEq` fn,
+	/// but ignores the `finalized_number` field.
+	pub fn check_heads_eq(&self, other: &Self) -> bool {
+		self.heads == other.heads
+	}
 }
 
 /// v1 protocol types.
 pub mod v1 {
-	use polkadot_primitives::v1::{
-		Hash, CollatorId, Id as ParaId, ErasureChunk, CandidateReceipt,
-		SignedAvailabilityBitfield, PoV, CandidateHash, ValidatorIndex, CandidateIndex, AvailableData,
-	};
+	use polkadot_primitives::v1::{AvailableData, CandidateHash, CandidateIndex, CollatorId, CompressedPoV, ErasureChunk, Hash, Id as ParaId, SignedAvailabilityBitfield, ValidatorIndex};
 	use polkadot_node_primitives::{
 		SignedFullStatement,
 		approval::{IndirectAssignmentCert, IndirectSignedApprovalVote},
@@ -251,14 +296,6 @@ pub mod v1 {
 	use parity_scale_codec::{Encode, Decode};
 	use super::RequestId;
 	use std::convert::TryFrom;
-
-	/// Network messages used by the availability distribution subsystem
-	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
-	pub enum AvailabilityDistributionMessage {
-		/// An erasure chunk for a given candidate hash.
-		#[codec(index = 0)]
-		Chunk(CandidateHash, ErasureChunk),
-	}
 
 	/// Network messages used by the availability recovery subsystem.
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
@@ -317,73 +354,6 @@ pub mod v1 {
 		Approvals(Vec<IndirectSignedApprovalVote>),
 	}
 
-	#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-	#[allow(missing_docs)]
-	pub enum CompressedPoVError {
-		#[error("Failed to compress a PoV")]
-		Compress,
-		#[error("Failed to decompress a PoV")]
-		Decompress,
-		#[error("Failed to decode the uncompressed PoV")]
-		Decode,
-		#[error("Architecture is not supported")]
-		NotSupported,
-	}
-
-	/// SCALE and Zstd encoded [`PoV`].
-	#[derive(Clone, Encode, Decode, PartialEq, Eq)]
-	pub struct CompressedPoV(Vec<u8>);
-
-	impl CompressedPoV {
-		/// Compress the given [`PoV`] and returns a [`CompressedPoV`].
-		#[cfg(not(target_os = "unknown"))]
-		pub fn compress(pov: &PoV) -> Result<Self, CompressedPoVError> {
-			zstd::encode_all(pov.encode().as_slice(), 3).map_err(|_| CompressedPoVError::Compress).map(Self)
-		}
-
-		/// Compress the given [`PoV`] and returns a [`CompressedPoV`].
-		#[cfg(target_os = "unknown")]
-		pub fn compress(_: &PoV) -> Result<Self, CompressedPoVError> {
-			Err(CompressedPoVError::NotSupported)
-		}
-
-		/// Decompress `self` and returns the [`PoV`] on success.
-		#[cfg(not(target_os = "unknown"))]
-		pub fn decompress(&self) -> Result<PoV, CompressedPoVError> {
-			use std::io::Read;
-			const MAX_POV_BLOCK_SIZE: usize = 32 * 1024 * 1024;
-
-			struct InputDecoder<'a, T: std::io::BufRead>(&'a mut zstd::Decoder<T>, usize);
-			impl<'a, T: std::io::BufRead> parity_scale_codec::Input for InputDecoder<'a, T> {
-				fn read(&mut self, into: &mut [u8]) -> Result<(), parity_scale_codec::Error> {
-					self.1 = self.1.saturating_add(into.len());
-					if self.1 > MAX_POV_BLOCK_SIZE {
-						return Err("pov block too big".into())
-					}
-					self.0.read_exact(into).map_err(Into::into)
-				}
-				fn remaining_len(&mut self) -> Result<Option<usize>, parity_scale_codec::Error> {
-					Ok(None)
-				}
-			}
-
-			let mut decoder = zstd::Decoder::new(self.0.as_slice()).map_err(|_| CompressedPoVError::Decompress)?;
-			PoV::decode(&mut InputDecoder(&mut decoder, 0)).map_err(|_| CompressedPoVError::Decode)
-		}
-
-		/// Decompress `self` and returns the [`PoV`] on success.
-		#[cfg(target_os = "unknown")]
-		pub fn decompress(&self) -> Result<PoV, CompressedPoVError> {
-			Err(CompressedPoVError::NotSupported)
-		}
-	}
-
-	impl std::fmt::Debug for CompressedPoV {
-		fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-			write!(f, "CompressedPoV({} bytes)", self.0.len())
-		}
-	}
-
 	/// Network messages used by the collator protocol subsystem
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
 	pub enum CollatorProtocolMessage {
@@ -394,12 +364,6 @@ pub mod v1 {
 		/// that they are a collator with given ID.
 		#[codec(index = 1)]
 		AdvertiseCollation(Hash, ParaId),
-		/// Request the advertised collation at that relay-parent.
-		#[codec(index = 2)]
-		RequestCollation(RequestId, Hash, ParaId),
-		/// A requested collation.
-		#[codec(index = 3)]
-		Collation(RequestId, CandidateReceipt, CompressedPoV),
 		/// A collation sent to a validator was seconded.
 		#[codec(index = 4)]
 		CollationSeconded(SignedFullStatement),
@@ -408,9 +372,6 @@ pub mod v1 {
 	/// All network messages on the validation peer-set.
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
 	pub enum ValidationProtocol {
-		/// Availability distribution messages
-		#[codec(index = 0)]
-		AvailabilityDistribution(AvailabilityDistributionMessage),
 		/// Bitfield distribution messages
 		#[codec(index = 1)]
 		BitfieldDistribution(BitfieldDistributionMessage),
@@ -428,11 +389,11 @@ pub mod v1 {
 		ApprovalDistribution(ApprovalDistributionMessage),
 	}
 
-	impl_try_from!(ValidationProtocol, AvailabilityDistribution, AvailabilityDistributionMessage);
 	impl_try_from!(ValidationProtocol, BitfieldDistribution, BitfieldDistributionMessage);
 	impl_try_from!(ValidationProtocol, PoVDistribution, PoVDistributionMessage);
 	impl_try_from!(ValidationProtocol, StatementDistribution, StatementDistributionMessage);
 	impl_try_from!(ValidationProtocol, ApprovalDistribution, ApprovalDistributionMessage);
+	impl_try_from!(ValidationProtocol, AvailabilityRecovery, AvailabilityRecoveryMessage);
 
 	/// All network messages on the collation peer-set.
 	#[derive(Debug, Clone, Encode, Decode, PartialEq, Eq)]
@@ -443,18 +404,4 @@ pub mod v1 {
 	}
 
 	impl_try_from!(CollationProtocol, CollatorProtocol, CollatorProtocolMessage);
-}
-
-#[cfg(test)]
-mod tests {
-	use polkadot_primitives::v1::PoV;
-	use super::v1::{CompressedPoV, CompressedPoVError};
-
-	#[test]
-	fn decompress_huge_pov_block_fails() {
-		let pov = PoV { block_data: vec![0; 63 * 1024 * 1024].into() };
-
-		let compressed = CompressedPoV::compress(&pov).unwrap();
-		assert_eq!(CompressedPoVError::Decode, compressed.decompress().unwrap_err());
-	}
 }

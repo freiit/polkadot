@@ -56,7 +56,7 @@ mod error;
 #[cfg(test)]
 mod tests;
 
-const LOG_TARGET: &str = "availability_recovery";
+const LOG_TARGET: &str = "parachain::availability-recovery";
 
 const COST_MERKLE_PROOF_INVALID: Rep = Rep::CostMinor("Merkle proof was invalid");
 const COST_UNEXPECTED_CHUNK: Rep = Rep::CostMinor("Peer has sent an unexpected chunk");
@@ -239,7 +239,7 @@ impl RequestFromBackersPhase {
 
 			// Request data.
 			to_state.send(FromInteraction::MakeFullDataRequest(
-				params.validator_authority_keys[validator_index as usize].clone(),
+				params.validator_authority_keys[validator_index.0 as usize].clone(),
 				params.candidate_hash.clone(),
 				validator_index,
 				tx,
@@ -279,8 +279,8 @@ impl RequestFromBackersPhase {
 }
 
 impl RequestChunksPhase {
-	fn new(n_validators: ValidatorIndex) -> Self {
-		let mut shuffling: Vec<_> = (0..n_validators).collect();
+	fn new(n_validators: u32) -> Self {
+		let mut shuffling: Vec<_> = (0..n_validators).map(ValidatorIndex).collect();
 		shuffling.shuffle(&mut rand::thread_rng());
 
 		RequestChunksPhase {
@@ -300,7 +300,7 @@ impl RequestChunksPhase {
 				let (tx, rx) = oneshot::channel();
 
 				to_state.send(FromInteraction::MakeChunkRequest(
-					params.validator_authority_keys[validator_index as usize].clone(),
+					params.validator_authority_keys[validator_index.0 as usize].clone(),
 					params.candidate_hash.clone(),
 					validator_index,
 					tx,
@@ -347,7 +347,7 @@ impl RequestChunksPhase {
 					if let Ok(anticipated_hash) = branch_hash(
 						&params.erasure_root,
 						&chunk.proof,
-						chunk.index as usize,
+						chunk.index.0 as usize,
 					) {
 						let erasure_chunk_hash = BlakeTwo256::hash(&chunk.chunk);
 
@@ -415,7 +415,7 @@ impl RequestChunksPhase {
 			if self.received_chunks.len() >= params.threshold {
 				let concluded = match polkadot_erasure_coding::reconstruct_v1(
 					params.validators.len(),
-					self.received_chunks.values().map(|c| (&c.chunk[..], c.index as usize)),
+					self.received_chunks.values().map(|c| (&c.chunk[..], c.index.0 as usize)),
 				) {
 					Ok(data) => {
 						if reconstructed_data_matches_root(params.validators.len(), &params.erasure_root, &data) {
@@ -665,8 +665,8 @@ async fn handle_recover(
 ) -> error::Result<()> {
 	let candidate_hash = receipt.hash();
 
-	let mut span = jaeger::candidate_hash_span(&candidate_hash, "availbility-recovery");
-	span.add_stage(jaeger::Stage::AvailabilityRecovery);
+	let span = jaeger::Span::new(candidate_hash, "availbility-recovery")
+		.with_stage(jaeger::Stage::AvailabilityRecovery);
 
 	if let Some(result) = state.availability_lru.get(&candidate_hash) {
 		if let Err(e) = response_sender.send(result.clone()) {
@@ -810,7 +810,6 @@ async fn handle_from_interaction(
 
 			let token = state.connecting_validators.push(rx);
 
-			println!("pushing full data request");
 			state.discovering_validators.entry(id).or_default().push(Awaited::FullData(AwaitedData {
 				validator_index,
 				candidate_hash,
@@ -846,6 +845,15 @@ async fn handle_network_update(
 					// message.
 					let chunk = query_chunk(ctx, candidate_hash, validator_index).await?;
 
+					tracing::trace!(
+						target: LOG_TARGET,
+						data_set = %chunk.is_some(),
+						%request_id,
+						?candidate_hash,
+						validator_index = validator_index.0,
+						"Responding to chunk request",
+					);
+
 					// Whatever the result, issue an
 					// AvailabilityRecoveryV1Message::Chunk(r_id, response) message.
 					let wire_message = protocol_v1::AvailabilityRecoveryMessage::Chunk(
@@ -867,6 +875,15 @@ async fn handle_network_update(
 							report_peer(ctx, peer, COST_UNEXPECTED_CHUNK).await;
 						}
 						Some((peer_id, Awaited::Chunk(awaited_chunk))) if peer_id == peer => {
+							tracing::trace!(
+								target: LOG_TARGET,
+								data_set = %chunk.is_some(),
+								%request_id,
+								candidate_hash = ?awaited_chunk.candidate_hash,
+								validator_index = awaited_chunk.validator_index.0,
+								"Received chunk response",
+							);
+
 							// If there exists an entry under r_id, remove it.
 							// Send the chunk response on the awaited_chunk for the interaction to handle.
 							if let Some(chunk) = chunk {
@@ -897,6 +914,14 @@ async fn handle_network_update(
 					// message.
 					let full_data = query_full_data(ctx, candidate_hash).await?;
 
+					tracing::trace!(
+						target: LOG_TARGET,
+						data_set = full_data.is_some(),
+						%request_id,
+						?candidate_hash,
+						"Responding to full data request",
+					);
+
 					// Whatever the result, issue an
 					// AvailabilityRecoveryV1Message::FullData(r_id, response) message.
 					let wire_message = protocol_v1::AvailabilityRecoveryMessage::FullData(
@@ -918,6 +943,14 @@ async fn handle_network_update(
 							report_peer(ctx, peer, COST_UNEXPECTED_CHUNK).await;
 						}
 						Some((peer_id, Awaited::FullData(awaited))) if peer_id == peer => {
+							tracing::trace!(
+								target: LOG_TARGET,
+								%request_id,
+								candidate_hash = ?awaited.candidate_hash,
+								data_set = %data.is_some(),
+								"Received full data response",
+							);
+
 							// If there exists an entry under r_id, remove it.
 							// Send the response on the awaited for the interaction to handle.
 							if let Some(data) = data {
@@ -962,16 +995,40 @@ async fn issue_request(
 	state.next_request_id += 1;
 
 	let wire_message = match awaited {
-		Awaited::Chunk(ref awaited_chunk) => protocol_v1::AvailabilityRecoveryMessage::RequestChunk(
-			request_id,
-			awaited_chunk.candidate_hash,
-			awaited_chunk.validator_index,
-		),
-		Awaited::FullData(ref awaited_data) => protocol_v1::AvailabilityRecoveryMessage::RequestFullData(
-			request_id,
-			awaited_data.candidate_hash,
-		),
+		Awaited::Chunk(ref awaited_chunk) => {
+			tracing::trace!(
+				target: LOG_TARGET,
+				%request_id,
+				%peer_id,
+				candidate_hash = ?awaited_chunk.candidate_hash,
+				validator_index = %awaited_chunk.validator_index.0,
+				"Requesting chunk",
+			);
+
+			protocol_v1::AvailabilityRecoveryMessage::RequestChunk(
+				request_id,
+				awaited_chunk.candidate_hash,
+				awaited_chunk.validator_index,
+			)
+		}
+		Awaited::FullData(ref awaited_data) => {
+			tracing::trace!(
+				target: LOG_TARGET,
+				%request_id,
+				%peer_id,
+				candidate_hash = ?awaited_data.candidate_hash,
+				validator_index = %awaited_data.validator_index.0,
+				"Requesting full data",
+			);
+
+			protocol_v1::AvailabilityRecoveryMessage::RequestFullData(
+				request_id,
+				awaited_data.candidate_hash,
+			)
+		}
 	};
+
+
 
 	ctx.send_message(AllMessages::NetworkBridge(
 		NetworkBridgeMessage::SendValidationMessage(
