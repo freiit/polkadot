@@ -156,6 +156,12 @@ impl Response {
 
 pub fn worker_entrypoint(socket_path: &str) {
 	worker_event_loop("execute", socket_path, |mut stream| async move {
+		let executor = TaskExecutor::new().map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("cannot create task executor: {}", e),
+			)
+		})?;
 		loop {
 			let (artifact_path, params) = recv_request(&mut stream).await?;
 			let artifact_bytes = async_std::fs::read(&artifact_path).await?;
@@ -165,13 +171,13 @@ pub fn worker_entrypoint(socket_path: &str) {
 					format!("artifact deserialization error: {}", e),
 				)
 			})?;
-			let response = validate_using_artifact(&artifact, &params);
+			let response = validate_using_artifact(&artifact, &params, &executor);
 			send_response(&mut stream, response).await?;
 		}
 	});
 }
 
-fn validate_using_artifact(artifact: &Artifact, params: &[u8]) -> Response {
+fn validate_using_artifact(artifact: &Artifact, params: &[u8], spawner: &TaskExecutor) -> Response {
 	let compiled_artifact = match artifact {
 		Artifact::PrevalidationErr(msg) => {
 			return Response::format_invalid("prevalidation", msg);
@@ -187,7 +193,7 @@ fn validate_using_artifact(artifact: &Artifact, params: &[u8]) -> Response {
 	};
 
 	let validation_started_at = Instant::now();
-	let descriptor_bytes = match crate::executor_intf::execute(compiled_artifact, params) {
+	let descriptor_bytes = match crate::executor_intf::execute(compiled_artifact, params, spawner.clone()) {
 		Err(err) => {
 			return Response::format_invalid("execute", &err.to_string());
 		}
@@ -209,5 +215,29 @@ fn validate_using_artifact(artifact: &Artifact, params: &[u8]) -> Response {
 	Response::Ok {
 		result_descriptor,
 		duration_ms,
+	}
+}
+
+/// An implementation of `SpawnNamed` on top of a futures' thread pool.
+///
+/// This is a light handle meaning it will only clone the handle not create a new thread pool.
+#[derive(Clone)]
+struct TaskExecutor(futures::executor::ThreadPool);
+
+impl TaskExecutor {
+	fn new() -> Result<Self, String> {
+		futures::executor::ThreadPool::new()
+			.map_err(|e| e.to_string())
+			.map(Self)
+	}
+}
+
+impl sp_core::traits::SpawnNamed for TaskExecutor {
+	fn spawn_blocking(&self, _: &'static str, future: futures::future::BoxFuture<'static, ()>) {
+		self.0.spawn_ok(future);
+	}
+
+	fn spawn(&self, _: &'static str, future: futures::future::BoxFuture<'static, ()>) {
+		self.0.spawn_ok(future);
 	}
 }

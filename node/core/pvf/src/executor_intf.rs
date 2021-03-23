@@ -51,11 +51,11 @@ pub fn prepare(blob: RuntimeBlob) -> Result<Vec<u8>, sc_executor_common::error::
 pub fn execute(
 	compiled_artifact: &[u8],
 	params: &[u8],
+	spawner: impl sp_core::traits::SpawnNamed + 'static,
 ) -> Result<Vec<u8>, sc_executor_common::error::Error> {
-	let extensions = sp_externalities::Extensions::new();
+	let mut extensions = sp_externalities::Extensions::new();
 
-	// extensions.register(sp_core::traits::TaskExecutorExt::new(spawner));
-	// extensions.register(sp_core::traits::CallInWasmExt::new(executor.clone()));
+	extensions.register(sp_core::traits::TaskExecutorExt::new(spawner));
 
 	let mut ext = ValidationExternalities(extensions);
 
