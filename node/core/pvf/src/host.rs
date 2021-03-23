@@ -259,16 +259,20 @@ async fn run(
 	loop {
 		futures::select_biased! {
 			_ = prepare_queue => {
-				panic!()
+				never!();
+				break;
 			},
 			_ = prepare_pool => {
-				panic!()
+				never!();
+				break;
 			},
 			_ = execute_queue => {
-				panic!()
+				never!();
+				break;
 			},
 			_ = sweeper => {
-				panic!() // TODO:
+				never!();
+				break;
 			},
 			() = cleanup_pulse.select_next_some() => {
 				break_if_fatal!(handle_cleanup_pulse(
